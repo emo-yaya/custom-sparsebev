@@ -184,13 +184,13 @@ class CustomNuScenesDataset(NuScenesDataset):
                 curr_sequence += 1
             res.append(curr_sequence)
 
-        self.flag = np.array(res, dtype=np.int64)
+        self.flag_fbbev = np.array(res, dtype=np.int64)
 
         if self.sequences_split_num != 1:
             if self.sequences_split_num == 'all':
-                self.flag = np.array(range(len(self.data_infos)), dtype=np.int64)
+                self.flag_fbbev = np.array(range(len(self.data_infos)), dtype=np.int64)
             else:
-                bin_counts = np.bincount(self.flag)
+                bin_counts = np.bincount(self.flag_fbbev)
                 new_flags = []
                 curr_new_flag = 0
                 for curr_flag in range(len(bin_counts)):
@@ -204,9 +204,9 @@ class CustomNuScenesDataset(NuScenesDataset):
                             new_flags.append(curr_new_flag)
                         curr_new_flag += 1
 
-                assert len(new_flags) == len(self.flag)
-                assert len(np.bincount(new_flags)) == len(np.bincount(self.flag)) * self.sequences_split_num
-                self.flag = np.array(new_flags, dtype=np.int64)
+                assert len(new_flags) == len(self.flag_fbbev)
+                assert len(np.bincount(new_flags)) == len(np.bincount(self.flag_fbbev)) * self.sequences_split_num
+                self.flag_fbbev = np.array(new_flags, dtype=np.int64)
 
     def get_data_info(self, index):
         info = self.data_infos[index]
@@ -275,8 +275,8 @@ class CustomNuScenesDataset(NuScenesDataset):
                 ego2global_rotation_fbbev=ego2global_rotation,
             ))
 
-        input_dict['sequence_group_idx'] = self.flag[index]
-        input_dict['start_of_sequence'] = index == 0 or self.flag[index - 1] != self.flag[index]
+        input_dict['sequence_group_idx'] = self.flag_fbbev[index]
+        input_dict['start_of_sequence'] = index == 0 or self.flag_fbbev[index - 1] != self.flag_fbbev[index]
         input_dict['curr_to_prev_ego_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
             self.data_infos[index], self.data_infos[index - 1],
             "ego", "ego"))
