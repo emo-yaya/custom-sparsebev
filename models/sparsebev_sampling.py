@@ -118,6 +118,8 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
     scale_weights = scale_weights.permute(0, 2, 3, 1, 4, 5)
     scale_weights = scale_weights.reshape(B*G*T, Q, P, -1)
 
+    sample_points_cam = sample_points_cam.contiguous()
+    scale_weights = scale_weights.contiguous()
     # multi-scale multi-view grid sample
     final = msmv_sampling(mlvl_feats, sample_points_cam, scale_weights)
 

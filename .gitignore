@@ -29,7 +29,7 @@ x64
 *__pycache__*
 *.py[cod]
 *$py.class
-
+models.egg-info
 # Distribution / packaging
 .Python
 build

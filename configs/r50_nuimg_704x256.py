@@ -47,6 +47,14 @@ img_norm_cfg = dict(
     mean=[123.675, 116.280, 103.530],
     std=[58.395, 57.120, 57.375],
     to_rgb=True)
+grid_config = {
+    'x': [-51.2, 51.2, 0.8],
+    'y': [-51.2, 51.2, 0.8],
+    'z': [-5, 3, 4],
+    'depth': [2.0, 42.0, 0.5],
+}
+depth_categories = 80  # (grid_config['depth'][1]-grid_config['depth'][0])//grid_config['depth'][2]
+use_checkpoint = True
 
 model = dict(
     type='SparseBEV',
@@ -57,12 +65,29 @@ model = dict(
     stop_prev_grad=0,
     img_backbone=img_backbone,
     img_neck=img_neck,
+    depth_net=dict(
+        type='CM_DepthNet',  # camera-aware depth net
+        in_channels=embed_dims,
+        context_channels=80,
+        downsample=16,
+        grid_config=grid_config,
+        depth_channels=depth_categories,
+        with_cp=use_checkpoint,
+        loss_depth_weight=1.,
+        use_dcn=False,
+    ),
+    forward_projection=dict(
+        type='LSSViewTransformerFunction3D',
+        grid_config=grid_config,
+        input_size=(256, 704),
+        downsample=16),
+    frpn=None,
     pts_bbox_head=dict(
         type='SparseBEVHead',
         num_classes=10,
         in_channels=embed_dims,
         num_query=num_query,
-        query_denoising=True,
+        query_denoising=False,
         query_denoising_groups=10,
         code_size=10,
         code_weights=[2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
@@ -120,7 +145,29 @@ ida_aug_conf = {
     'H': 900, 'W': 1600,
     'rand_flip': True,
 }
+data_config = {
+    'cams': [
+        'CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_LEFT',
+        'CAM_BACK', 'CAM_BACK_RIGHT'
+    ],
+    'Ncams':
+    6,
+    'input_size': (256, 704),
+    'src_size': (900, 1600),
 
+    # Augmentation
+    'resize': (-0.06, 0.11),
+    'rot': (-5.4, 5.4),
+    'flip': True,
+    'crop_h': (0.0, 0.0),
+    'resize_test': 0.00,
+}
+
+bda_aug_conf = dict(
+    rot_lim=(0, 0),
+    scale_lim=(1., 1.),
+    flip_dx_ratio=0.,
+    flip_dy_ratio=0.)
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
     dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=num_frames - 1),
@@ -130,14 +177,29 @@ train_pipeline = [
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=True),
     dict(type='GlobalRotScaleTransImage', rot_range=[-0.3925, 0.3925], scale_ratio_range=[0.95, 1.05]),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
-    dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img'], meta_keys=(
-        'filename', 'ori_shape', 'img_shape', 'pad_shape', 'lidar2img', 'img_timestamp'))
+    dict(
+        type='PrepareImageInputs',
+        is_train=True,
+        data_config=data_config, sequential=True),
+    dict(
+        type='LoadAnnotationsBEVDepth',
+        bda_aug_conf=bda_aug_conf,
+        classes=class_names),
+    dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'img_inputs'], meta_keys=(
+        'filename', 'ori_shape', 'img_shape', 'pad_shape', 'lidar2img', 'img_timestamp',
+                'sequence_group_idx', 'curr_to_prev_ego_rt','start_of_sequence',))
 ]
 
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
     dict(type='LoadMultiViewImageFromMultiSweeps', sweeps_num=num_frames - 1, test_mode=True),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=False),
+    dict(type='PrepareImageInputs', data_config=data_config, sequential=True),
+    dict(
+        type='LoadAnnotationsBEVDepth',
+        bda_aug_conf=bda_aug_conf,
+        classes=class_names,
+        is_train=False),
     dict(
         type='MultiScaleFlipAug3D',
         img_scale=(1600, 900),
@@ -145,9 +207,10 @@ test_pipeline = [
         flip=False,
         transforms=[
             dict(type='DefaultFormatBundle3D', class_names=class_names, with_label=False),
-            dict(type='Collect3D', keys=['img'], meta_keys=(
+            dict(type='Collect3D', keys=['img', 'img_inputs'], meta_keys=(
                 'filename', 'box_type_3d', 'ori_shape', 'img_shape', 'pad_shape',
-                'lidar2img', 'img_timestamp'))
+                'lidar2img', 'img_timestamp', 
+                'sequence_group_idx', 'curr_to_prev_ego_rt','start_of_sequence',))
         ])
 ]
 
@@ -208,7 +271,7 @@ lr_config = dict(
     min_lr_ratio=1e-3
 )
 total_epochs = 24
-batch_size = 8
+batch_size = 2
 
 # load pretrained weights
 load_from = 'pretrain/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth'
