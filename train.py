@@ -61,7 +61,8 @@ def main():
         else:
             run_name = ''
             if not cfgs.debug:
-                run_name = input('Name your run (leave blank for default): ')
+                print('')
+                # run_name = input('Name your run (leave blank for default): ')
             if run_name == '':
                 run_name = datetime.now().strftime("%Y-%m-%d/%H-%M-%S")
 
