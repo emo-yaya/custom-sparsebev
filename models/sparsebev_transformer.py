@@ -17,7 +17,7 @@ from .csrc.wrapper import MSMV_CUDA
 class SparseBEVTransformer(BaseModule):
     def __init__(self, embed_dims, num_frames=8, num_points=4, num_layers=6, num_levels=4, num_classes=10, code_size=10, pc_range=[], init_cfg=None):
         assert init_cfg is None, 'To prevent abnormal initialization ' \
-                            'behavior, init_cfg is not allowed to be set'
+            'behavior, init_cfg is not allowed to be set'
         super(SparseBEVTransformer, self).__init__(init_cfg=init_cfg)
 
         self.embed_dims = embed_dims
@@ -29,8 +29,8 @@ class SparseBEVTransformer(BaseModule):
     def init_weights(self):
         self.decoder.init_weights()
 
-    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
-        cls_scores, bbox_preds = self.decoder(query_bbox, query_feat, mlvl_feats, attn_mask, img_metas)
+    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas, bev_queries):
+        cls_scores, bbox_preds = self.decoder(query_bbox, query_feat, mlvl_feats, attn_mask, img_metas, bev_queries)
 
         cls_scores = torch.nan_to_num(cls_scores)
         bbox_preds = torch.nan_to_num(bbox_preds)
@@ -53,7 +53,7 @@ class SparseBEVTransformerDecoder(BaseModule):
     def init_weights(self):
         self.decoder_layer.init_weights()
 
-    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
+    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas, bev_queries):
         cls_scores, bbox_preds = [], []
 
         # calculate time difference according to timestamps
@@ -88,7 +88,7 @@ class SparseBEVTransformerDecoder(BaseModule):
             DUMP.stage_count = i
 
             query_feat, cls_score, bbox_pred = self.decoder_layer(
-                query_bbox, query_feat, mlvl_feats, attn_mask, img_metas
+                query_bbox, query_feat, mlvl_feats, attn_mask, img_metas, bev_queries
             )
             query_bbox = bbox_pred.clone().detach()
 
@@ -142,12 +142,32 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
             reg_branch.append(nn.ReLU(inplace=True))
         reg_branch.append(nn.Linear(self.embed_dims, self.code_size))
         self.reg_branch = nn.Sequential(*reg_branch)
+        
+        self.sampling_bev = CustomBEVSampling(embed_dims, num_frames=1, num_groups=4, num_points=num_points, num_levels=1, pc_range=pc_range)
+        self.mixing_bev = AdaptiveMixing(in_dim=embed_dims, in_points=num_points * 1, n_groups=4, out_points=128)
+        self.norm_bev = nn.LayerNorm(embed_dims)
+        
+        self.fuse_mlp = nn.Sequential(
+            nn.Linear(embed_dims, embed_dims),
+            nn.ReLU(),
+            nn.Linear(embed_dims, embed_dims),
+            nn.LayerNorm(embed_dims)
+        )
+
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(embed_dims * 2, embed_dims),
+            nn.ReLU(),
+            nn.Linear(embed_dims, embed_dims),
+            nn.Sigmoid()
+        )
 
     @torch.no_grad()
     def init_weights(self):
         self.self_attn.init_weights()
         self.sampling.init_weights()
+        # self.sampling_bev.init_weights()
         self.mixing.init_weights()
+        # self.mixing_bev.init_weights()
 
         bias_init = bias_init_with_prob(0.01)
         nn.init.constant_(self.cls_branch[-1].bias, bias_init)
@@ -159,7 +179,7 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
 
         return torch.cat([xyz_new, bbox_delta[..., 3:]], dim=-1)
 
-    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
+    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas, bev_feats):
         """
         query_bbox: [B, Q, 10] [cx, cy, cz, w, h, d, rot.sin, rot.cos, vx, vy]
         """
@@ -168,6 +188,21 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
 
         query_feat = self.norm1(self.self_attn(query_bbox, query_feat, attn_mask))
         sampled_feat = self.sampling(query_bbox, query_feat, mlvl_feats, img_metas)
+        
+        sampled_feat_bev = self.sampling_bev(query_bbox, query_feat, bev_feats, img_metas)
+        query_feat_bev = self.norm_bev(self.mixing_bev(sampled_feat_bev, query_feat))
+        query_feat_cam = self.norm2(self.mixing(sampled_feat, query_feat)) 
+        query_feat_bev = self.fuse_mlp(query_feat_bev)
+
+        fusion_weight = self.fusion_gate(torch.cat([query_feat_cam, query_feat_bev], dim=-1) )
+        # query_feat = query_feat_cam + self.fuse_mlp(query_feat_bev)
+
+        query_feat = fusion_weight * query_feat_cam + (1 - fusion_weight) * query_feat_bev
+
+
+        # fusion_weight = torch.sigmoid(self.fusion_gate(torch.cat([query_feat_cam, query_feat_bev], dim=-1)))
+        # query_feat = query_feat_cam * fusion_weight + self.fuse_mlp(query_feat_bev) * (1 - fusion_weight)
+
         query_feat = self.norm2(self.mixing(sampled_feat, query_feat))
         query_feat = self.norm3(self.ffn(query_feat))
 
@@ -385,3 +420,100 @@ class AdaptiveMixing(nn.Module):
             return cp(self.inner_forward, x, query, use_reentrant=False)
         else:
             return self.inner_forward(x, query)
+
+
+
+class CustomBEVSampling(BaseModule):
+    """Adaptive Spatio-temporal Sampling"""
+
+    def __init__(self, embed_dims=256, num_frames=4, num_groups=4, num_points=8, num_levels=1, pc_range=[], init_cfg=None):
+        super().__init__(init_cfg)
+        
+        self.num_frames = num_frames
+        self.num_points = num_points
+        self.num_groups = num_groups
+        self.num_levels = num_levels
+        self.pc_range = pc_range
+
+        self.sampling_offset = nn.Linear(embed_dims, num_groups * num_points * 3)
+        self.scale_weights = nn.Linear(embed_dims, num_groups * num_points * num_levels)
+
+    def init_weights(self):
+        bias = self.sampling_offset.bias.data.view(self.num_groups * self.num_points, 3)
+        nn.init.zeros_(self.sampling_offset.weight)
+        nn.init.uniform_(bias[:, 0:3], -0.5, 0.5)
+
+    def inner_forward(self, query_bbox, query_feat, bev_feats, img_metas):
+        '''
+        query_bbox: [B, Q, 10]
+        query_feat: [B, Q, C]
+        '''
+        B, GC, H, W = bev_feats.shape
+        G = self.num_groups
+        C = GC // G
+        P = self.num_points
+        # 1. reshape BEV特征为每个group分离的形式
+        sample_bev_feats = bev_feats.reshape(B, G, C, H, W)  # [B, G, C, H, W]
+
+        # 2. 采样点生成
+        B, Q = query_bbox.shape[:2]
+        sampling_offset = self.sampling_offset(query_feat)
+        sampling_offset = sampling_offset.view(B, Q, self.num_groups * self.num_points, 3)
+        sampling_points = make_sample_points(query_bbox, sampling_offset, self.pc_range)  # [B, Q, GP, 3]
+       
+        # 4. reshape为 [B, Q, G, P, 3]
+        sampling_points = sampling_points.reshape(B, Q, self.num_groups, self.num_points, 3)
+
+        # 5. 归一化 x 和 y 到 [0, 1]
+        sampling_points[..., 0] = (sampling_points[..., 0] - self.pc_range[0]) / (self.pc_range[3] - self.pc_range[0])
+        sampling_points[..., 1] = (sampling_points[..., 1] - self.pc_range[1]) / (self.pc_range[4] - self.pc_range[1])
+
+        # 6. 获取 grid_sample 所需的 2D 采样位置 (x, y)
+        sampling_locations = sampling_points[..., :2]  # [B, Q, G, P, 2]
+
+        # 7. 变换到 [-1, 1] 区间供 grid_sample 使用
+        sampling_locations = sampling_locations * 2 - 1
+
+        # 8. 调整维度为 [BG, Q*P, 1, 2]，以适配 grid_sample
+        sampling_locations = sampling_locations.permute(0, 2, 1, 3, 4)  # [B, G, Q, P, 2]
+        sampling_locations = sampling_locations.reshape(B * G, Q * self.num_points, 1, 2)
+
+        # 9. reshape sample_bev_feats → [BG, C, H, W]
+        sample_bev_feats = sample_bev_feats.reshape(B * G, C, H, W)
+
+        # 10. 使用 grid_sample 进行采样
+        sampled_feats = F.grid_sample(
+            sample_bev_feats, sampling_locations, mode='bilinear',
+            padding_mode='zeros', align_corners=True
+        )  # [BG, C, Q*P, 1]
+
+        sampled_feats = sampled_feats.reshape(B * G, C, Q, self.num_points)  # [BG, C, Q, P]
+        # sampled_feats = sampled_feats.squeeze(-1).permute(0, 2, 1)  # [B*G, Q*P, C]
+        # sampled_feats = sampled_feats.reshape(B, G, Q, P, C).permute(0, 2, 1, 3, 4)  # [B, Q, G, P, C]
+
+        # scale weights
+        scale_weights = self.scale_weights(query_feat).view(B, Q, self.num_groups, self.num_points, self.num_levels)
+        scale_weights = torch.softmax(scale_weights, dim=-1)
+
+        scale_weights = scale_weights.reshape(B, Q, G, P, -1)
+        scale_weights = scale_weights.permute(0, 2, 1, 3, 4)
+        scale_weights = scale_weights.reshape(B*G, Q, P, -1)
+
+        if scale_weights is not None:
+            final = sampled_feats * scale_weights.reshape(B*G, 1, Q, P)
+        else:
+            final = sampled_feats
+
+        final = final.permute(0, 2, 1, 3)
+        # reorganize the sampled features
+        _, Q, C, P = final.shape # [BG, Q, C, P]
+        final = final.reshape(B, G, Q, C, P)
+        final = final.permute(0, 2, 1, 4, 3) # [B, Q, G, P, C]
+        
+        return final
+
+    def forward(self, query_bbox, query_feat, bev_feats, img_metas):
+        if self.training and query_feat.requires_grad:
+            return cp(self.inner_forward, query_bbox, query_feat, bev_feats, img_metas, use_reentrant=False)
+        else:
+            return self.inner_forward(query_bbox, query_feat, bev_feats, img_metas)
