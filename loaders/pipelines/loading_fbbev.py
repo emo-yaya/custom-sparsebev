@@ -28,7 +28,210 @@ def mmlabNormalize(img, mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.3
     img = torch.tensor(img).float().permute(2, 0, 1).contiguous()
     return img
 
+@PIPELINES.register_module()
+class LoadPointsFromFile(object):
+    """Load Points From File.
 
+    Load points from file.
+
+    Args:
+        coord_type (str): The type of coordinates of points cloud.
+            Available options includes:
+            - 'LIDAR': Points in LiDAR coordinates.
+            - 'DEPTH': Points in depth coordinates, usually for indoor dataset.
+            - 'CAMERA': Points in camera coordinates.
+        load_dim (int, optional): The dimension of the loaded points.
+            Defaults to 6.
+        use_dim (list[int], optional): Which dimensions of the points to use.
+            Defaults to [0, 1, 2]. For KITTI dataset, set use_dim=4
+            or use_dim=[0, 1, 2, 3] to use the intensity dimension.
+        shift_height (bool, optional): Whether to use shifted height.
+            Defaults to False.
+        use_color (bool, optional): Whether to use color features.
+            Defaults to False.
+        file_client_args (dict, optional): Config dict of file clients,
+            refer to
+            https://github.com/open-mmlab/mmcv/blob/master/mmcv/fileio/file_client.py
+            for more details. Defaults to dict(backend='disk').
+    """
+
+    def __init__(self,
+                 coord_type,
+                 load_dim=6,
+                 use_dim=[0, 1, 2],
+                 shift_height=False,
+                 use_color=False,
+                 dtype='float32',
+                 file_client_args=dict(backend='disk'),
+                 translate2ego=True,
+                 ):
+        self.shift_height = shift_height
+        self.use_color = use_color
+        if isinstance(use_dim, int):
+            use_dim = list(range(use_dim))
+        assert max(use_dim) < load_dim, \
+            f'Expect all used dimensions < {load_dim}, got {use_dim}'
+        assert coord_type in ['CAMERA', 'LIDAR', 'DEPTH']
+
+        self.coord_type = coord_type
+        self.load_dim = load_dim
+        self.use_dim = use_dim
+        self.file_client_args = file_client_args.copy()
+        self.file_client = None
+        if dtype=='float32':
+            self.dtype = np.float32
+        elif dtype== 'float16':
+            self.dtype = np.float16
+        else:
+            assert False
+        self.translate2ego = translate2ego
+
+    def _load_points(self, pts_filename):
+        """Private function to load point clouds data.
+
+        Args:
+            pts_filename (str): Filename of point clouds data.
+
+        Returns:
+            np.ndarray: An array containing point clouds data.
+        """
+        if self.file_client is None:
+            self.file_client = mmcv.FileClient(**self.file_client_args)
+        try:
+            pts_bytes = self.file_client.get(pts_filename)
+            points = np.frombuffer(pts_bytes, dtype=self.dtype)
+        except ConnectionError:
+            mmcv.check_file_exist(pts_filename)
+            if pts_filename.endswith('.npy'):
+                points = np.load(pts_filename)
+            else:
+                points = np.fromfile(pts_filename, dtype=self.dtype)
+
+        return points
+
+
+    def __call__(self, results):
+        """Call function to load points data from file.
+
+        Args:
+            results (dict): Result dict containing point clouds data.
+
+        Returns:
+            dict: The result dict containing the point clouds data.
+                Added key and value are described below.
+
+                - points (:obj:`BasePoints`): Point clouds data.
+        """
+        pts_filename = results['pts_filename']
+        points = self._load_points(pts_filename)
+        points = points.reshape(-1, self.load_dim)
+        points = points[:, self.use_dim]
+
+
+
+        attribute_dims = None
+
+        if self.shift_height:
+            floor_height = np.percentile(points[:, 2], 0.99)
+            height = points[:, 2] - floor_height
+            points = np.concatenate(
+                [points[:, :3],
+                 np.expand_dims(height, 1), points[:, 3:]], 1)
+            attribute_dims = dict(height=3)
+
+        if self.use_color:
+            assert len(self.use_dim) >= 6
+            if attribute_dims is None:
+                attribute_dims = dict()
+            attribute_dims.update(
+                dict(color=[
+                    points.shape[1] - 3,
+                    points.shape[1] - 2,
+                    points.shape[1] - 1,
+                ]))
+
+        points_class = get_points_type(self.coord_type)
+        points = points_class(
+            points, points_dim=points.shape[-1], attribute_dims=attribute_dims)
+
+        results['points'] = points
+        if self.translate2ego:
+            lidar2lidarego = np.eye(4, dtype=np.float32)
+            lidar2lidarego[:3, :3] = Quaternion(
+            results['curr']['lidar2ego_rotation']).rotation_matrix
+            lidar2lidarego[:3, 3] = results['curr']['lidar2ego_translation']
+            lidar2lidarego = torch.from_numpy(lidar2lidarego)
+            results['points'].tensor[:, :3]  = results['points'].tensor[:, :3].matmul(lidar2lidarego[:3, :3].T) + lidar2lidarego[:3, 3]
+
+        return results
+
+    def __repr__(self):
+        """str: Return a string that describes the module."""
+        repr_str = self.__class__.__name__ + '('
+        repr_str += f'shift_height={self.shift_height}, '
+        repr_str += f'use_color={self.use_color}, '
+        repr_str += f'file_client_args={self.file_client_args}, '
+        repr_str += f'load_dim={self.load_dim}, '
+        repr_str += f'use_dim={self.use_dim})'
+        return repr_str
+    
+
+@PIPELINES.register_module()
+class PointToMultiViewDepth(object):
+
+    def __init__(self, grid_config, downsample=1):
+        self.downsample = downsample
+        self.grid_config = grid_config
+
+    def points2depthmap(self, points, height, width):
+        height, width = height // self.downsample, width // self.downsample
+        depth_map = torch.zeros((height, width), dtype=torch.float32)
+        coor = torch.round(points[:, :2] / self.downsample)
+        depth = points[:, 2]
+        kept1 = (coor[:, 0] >= 0) & (coor[:, 0] < width) & (
+            coor[:, 1] >= 0) & (coor[:, 1] < height) & (
+                depth < self.grid_config['depth'][1]) & (
+                    depth >= self.grid_config['depth'][0])
+        coor, depth = coor[kept1], depth[kept1]
+
+        ranks = coor[:, 0] + coor[:, 1] * width
+        sort = (ranks + depth / 100.).argsort()
+        coor, depth, ranks = coor[sort], depth[sort], ranks[sort]
+
+
+        kept2 = torch.ones(coor.shape[0], device=coor.device, dtype=torch.bool)
+        kept2[1:] = (ranks[1:] != ranks[:-1])
+        coor, depth = coor[kept2], depth[kept2]
+
+
+        coor = coor.to(torch.long)
+        depth_map[coor[:, 1], coor[:, 0]] = depth
+     
+        return depth_map
+
+    def __call__(self, results):
+        points_lidar = results['points']
+        imgs, rots, trans, intrins = results['img_inputs'][:4]
+        post_rots, post_trans, bda = results['img_inputs'][4:]
+        depth_map_list = []
+        img = results['img']
+        for cid in range(len(img)):
+            lidar2img = torch.tensor(results['lidar2img'][cid])
+            points_img = points_lidar.tensor[:, :3].matmul(
+                lidar2img[:3, :3].T) + lidar2img[:3, 3].unsqueeze(0)
+            points_img = torch.cat(
+                [points_img[:, :2] / points_img[:, 2:3], points_img[:, 2:3]],
+                1)
+            points_img = points_img.matmul(
+                post_rots[cid].T) + post_trans[cid:cid + 1, :]
+            depth_map = self.points2depthmap(points_img, 256, 704)  
+            depth_map_list.append(depth_map)
+          
+        depth_map = torch.stack(depth_map_list)
+
+        results['gt_depth'] = depth_map
+
+        return results
 
 @PIPELINES.register_module()
 class PrepareImageInputs(object):

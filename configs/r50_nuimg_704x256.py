@@ -51,8 +51,9 @@ grid_config = {
     'x': [-51.2, 51.2, 0.8],
     'y': [-51.2, 51.2, 0.8],
     'z': [-5, 3, 4],
-    'depth': [2.0, 42.0, 0.5],
+    'depth': [2.0, 54.0, 0.5],
 }
+depth_categories = 104 #(grid_config['depth'][1]-grid_config['depth'][0])//grid_config['depth'][2]
 
 model = dict(
     type='SparseBEV',
@@ -69,7 +70,7 @@ model = dict(
         context_channels=80,
         downsample=16,
         grid_config=grid_config,
-        depth_channels=80,
+        depth_channels=depth_categories,
         with_cp=True,
         loss_depth_weight=1.,
         use_dcn=False,
@@ -162,7 +163,14 @@ train_pipeline = [
         type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
         classes=class_names),
-    dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'img_inputs'], meta_keys=(
+    dict(
+        type='LoadPointsFromFile',
+        coord_type='LIDAR',
+        load_dim=5,
+        use_dim=5,
+        file_client_args=dict(backend='disk')),
+    dict(type='PointToMultiViewDepth', downsample=1, grid_config=grid_config),
+    dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'img_inputs', 'gt_depth'], meta_keys=(
         'filename', 'ori_shape', 'img_shape', 'pad_shape', 'lidar2img', 'img_timestamp',
                 'sequence_group_idx', 'curr_to_prev_ego_rt','start_of_sequence',))
 ]
@@ -248,7 +256,7 @@ lr_config = dict(
     min_lr_ratio=1e-3
 )
 total_epochs = 24
-batch_size = 2
+batch_size = 8
 
 # load pretrained weights
 load_from = 'pretrain/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth'

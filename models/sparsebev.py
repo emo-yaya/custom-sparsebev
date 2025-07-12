@@ -335,7 +335,7 @@ class SparseBEV(MVXTwoStageDetector):
         context_depth, depth = self.depth_net(context_depth, mlp_input)
         bev_feat = self.forward_projection(cam_params, context_depth, depth)
         
-        return img_feats_reshaped, bev_feat
+        return img_feats_reshaped, bev_feat, depth
 
     def forward_pts_train(self,
                           pts_feats,
@@ -390,7 +390,8 @@ class SparseBEV(MVXTwoStageDetector):
                       gt_bboxes_ignore=None,
                       img_depth=None,
                       img_mask=None,
-                      img_inputs=None):
+                      img_inputs=None,
+                      gt_depth=None):
         """Forward training function.
         Args:
             points (list[torch.Tensor], optional): Points of each sample.
@@ -414,7 +415,7 @@ class SparseBEV(MVXTwoStageDetector):
         Returns:
             dict: Losses of different branches.
         """
-        img_feats, bev_feat = self.extract_feat(img, img_metas, img_inputs)
+        img_feats, bev_feat, depth = self.extract_feat(img, img_metas, img_inputs)
         
         bev_feat = self.fuse_history(bev_feat, img_metas, img_inputs[6])
 
@@ -423,6 +424,8 @@ class SparseBEV(MVXTwoStageDetector):
             img_metas[i]['gt_labels_3d'] = gt_labels_3d[i]
 
         losses = self.forward_pts_train(img_feats, gt_bboxes_3d, gt_labels_3d, img_metas, gt_bboxes_ignore, bev_feat.mean(-1))
+        loss_depth = self.depth_net.get_depth_loss(gt_depth, depth)
+        losses.update(loss_depth)
         return losses
 
     def forward_test(self, img_metas, img=None, **kwargs):
@@ -452,7 +455,7 @@ class SparseBEV(MVXTwoStageDetector):
             return self.simple_test_offline(img_metas, img, rescale, img_inputs[0])
 
     def simple_test_offline(self, img_metas, img=None, rescale=False, img_inputs=None):
-        img_feats, bev_feat = self.extract_feat(img=img, img_metas=img_metas, img_inputs = img_inputs)
+        img_feats, bev_feat, depth = self.extract_feat(img=img, img_metas=img_metas, img_inputs = img_inputs)
 
         bev_feat = self.fuse_history(bev_feat, img_metas, img_inputs[6])
 
@@ -495,7 +498,7 @@ class SparseBEV(MVXTwoStageDetector):
                 img_feats_curr = self.memory[img_filenames[img_indices[0]]]
             else:
                 # extract feature and put into memory
-                img_feats_curr, bev_feat = self.extract_feat(img[:, i], img_metas_curr, img_inputs)
+                img_feats_curr, bev_feat, depth = self.extract_feat(img[:, i], img_metas_curr, img_inputs)
                 bev_feat = self.fuse_history(bev_feat, img_metas, img_inputs[6])
                 self.memory[img_filenames[img_indices[0]]] = img_feats_curr
                 self.queue.put(img_filenames[img_indices[0]])
