@@ -153,10 +153,13 @@ def main():
 
     if cfgs.eval_config['interval'] > 0:
         if world_size > 1:
-            runner.register_hook(DistEvalHook(val_loader, interval=cfgs.eval_config['interval'], gpu_collect=True))
+            runner.register_hook(DistEvalHook(val_loader, interval=cfgs.eval_config['interval'], gpu_collect=False))
         else:
             runner.register_hook(EvalHook(val_loader, interval=cfgs.eval_config['interval']))
 
+    load_checkpoint(
+        model, 'pretrain/r50_256x705_depth_pretrain.pth', map_location='cpu',
+    )
     if cfgs.resume_from is not None:
         logging.info('Resuming from %s' % cfgs.resume_from)
         runner.resume(cfgs.resume_from)

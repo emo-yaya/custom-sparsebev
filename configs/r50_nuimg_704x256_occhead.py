@@ -127,59 +127,59 @@ model = dict(
             loss_voxel_lovasz_weight=1.0,
         ),
     ),
-    pts_bbox_head=dict(
-        type='SparseBEVHead',
-        num_classes=10,
-        in_channels=embed_dims,
-        num_query=num_query,
-        query_denoising=True,
-        query_denoising_groups=10,
-        code_size=10,
-        code_weights=[2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        sync_cls_avg_factor=True,
-        transformer=dict(
-            type='SparseBEVTransformer',
-            embed_dims=embed_dims,
-            num_frames=num_frames,
-            num_points=num_points,
-            num_layers=num_layers,
-            num_levels=num_levels,
-            num_classes=10,
-            code_size=10,
-            pc_range=point_cloud_range),
-        bbox_coder=dict(
-            type='NMSFreeCoder',
-            post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
-            pc_range=point_cloud_range,
-            max_num=300,
-            voxel_size=voxel_size,
-            score_threshold=0.05,
-            num_classes=10),
-        positional_encoding=dict(
-            type='SinePositionalEncoding',
-            num_feats=embed_dims // 2,
-            normalize=True,
-            offset=-0.5),
-        loss_cls=dict(
-            type='FocalLoss',
-            use_sigmoid=True,
-            gamma=2.0,
-            alpha=0.25,
-            loss_weight=2.0),
-        loss_bbox=dict(type='L1Loss', loss_weight=0.25),
-        loss_iou=dict(type='GIoULoss', loss_weight=0.0)),
-    train_cfg=dict(pts=dict(
-        grid_size=[512, 512, 1],
-        voxel_size=voxel_size,
-        point_cloud_range=point_cloud_range,
-        out_size_factor=4,
-        assigner=dict(
-            type='HungarianAssigner3D',
-            cls_cost=dict(type='FocalLossCost', weight=2.0),
-            reg_cost=dict(type='BBox3DL1Cost', weight=0.25),
-            iou_cost=dict(type='IoUCost', weight=0.0),
-        )
-    ))
+    # pts_bbox_head=dict(
+    #     type='SparseBEVHead',
+    #     num_classes=10,
+    #     in_channels=embed_dims,
+    #     num_query=num_query,
+    #     query_denoising=True,
+    #     query_denoising_groups=10,
+    #     code_size=10,
+    #     code_weights=[2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    #     sync_cls_avg_factor=True,
+    #     transformer=dict(
+    #         type='SparseBEVTransformer',
+    #         embed_dims=embed_dims,
+    #         num_frames=num_frames,
+    #         num_points=num_points,
+    #         num_layers=num_layers,
+    #         num_levels=num_levels,
+    #         num_classes=10,
+    #         code_size=10,
+    #         pc_range=point_cloud_range),
+    #     bbox_coder=dict(
+    #         type='NMSFreeCoder',
+    #         post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
+    #         pc_range=point_cloud_range,
+    #         max_num=300,
+    #         voxel_size=voxel_size,
+    #         score_threshold=0.05,
+    #         num_classes=10),
+    #     positional_encoding=dict(
+    #         type='SinePositionalEncoding',
+    #         num_feats=embed_dims // 2,
+    #         normalize=True,
+    #         offset=-0.5),
+    #     loss_cls=dict(
+    #         type='FocalLoss',
+    #         use_sigmoid=True,
+    #         gamma=2.0,
+    #         alpha=0.25,
+    #         loss_weight=2.0),
+    #     loss_bbox=dict(type='L1Loss', loss_weight=0.25),
+    #     loss_iou=dict(type='GIoULoss', loss_weight=0.0)),
+    # train_cfg=dict(pts=dict(
+    #     grid_size=[512, 512, 1],
+    #     voxel_size=voxel_size,
+    #     point_cloud_range=point_cloud_range,
+    #     out_size_factor=4,
+    #     assigner=dict(
+    #         type='HungarianAssigner3D',
+    #         cls_cost=dict(type='FocalLossCost', weight=2.0),
+    #         reg_cost=dict(type='BBox3DL1Cost', weight=0.25),
+    #         iou_cost=dict(type='IoUCost', weight=0.0),
+    #     )
+    # ))
 )
 
 ida_aug_conf = {

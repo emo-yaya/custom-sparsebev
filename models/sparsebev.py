@@ -1,3 +1,4 @@
+import os
 import queue
 import torch
 import numpy as np
@@ -36,6 +37,10 @@ class SparseBEV(MVXTwoStageDetector):
                  forward_projection=None,
                  depth_net=None,
                  frpn=None,
+                 img_bev_encoder_backbone=None,
+                 img_bev_encoder_neck=None,
+                 bev_pts_bbox_head=None,
+                 occupancy_head=None,
                  pts_bbox_head=None,
                  img_roi_head=None,
                  img_rpn_head=None,
@@ -54,6 +59,10 @@ class SparseBEV(MVXTwoStageDetector):
         self.use_grid_mask = True
         self.forward_projection = builder3d.build_neck(forward_projection) if forward_projection else None
         self.depth_net = builder3d.build_head(depth_net) if depth_net else None
+        self.img_bev_encoder_backbone = builder3d.build_backbone(img_bev_encoder_backbone) if img_bev_encoder_backbone else None
+        self.img_bev_encoder_neck = builder3d.build_neck(img_bev_encoder_neck) if img_bev_encoder_neck else None
+        self.bev_pts_bbox_head = builder3d.build_head(bev_pts_bbox_head) if bev_pts_bbox_head else None
+        self.occupancy_head = builder3d.build_head(occupancy_head) if occupancy_head else None
 
         self.memory = {}
         self.queue = queue.Queue()
@@ -63,7 +72,7 @@ class SparseBEV(MVXTwoStageDetector):
         self.interpolation_mode = 'bilinear'
         self.history_cat_num = 16
         self.history_cam_sweep_freq = 0.5 # seconds between each frame
-        history_cat_conv_out_channels = 256
+        history_cat_conv_out_channels = 80
         ## Embed each sample with its relative temporal offset with current timestep
         conv = nn.Conv3d
         self.history_keyframe_time_conv = nn.Sequential(
@@ -258,7 +267,19 @@ class SparseBEV(MVXTwoStageDetector):
 
         return img_feats
 
-    def extract_feat(self, img, img_metas, img_inputs):
+
+    @force_fp32()
+    def bev_encoder(self, x):
+        x = self.img_bev_encoder_backbone(x)
+    
+        x = self.img_bev_encoder_neck(x)
+        
+        if type(x) not in [list, tuple]:
+             x = [x]
+
+        return x
+    
+    def extract_feat(self, img, img_metas, img_inputs, gt_depth=None):
         if isinstance(img, list):
             img = torch.stack(img, dim=0)
 
@@ -328,15 +349,58 @@ class SparseBEV(MVXTwoStageDetector):
             BN, C, H, W = img_feat.size()
             img_feats_reshaped.append(img_feat.view(B, int(BN / B), C, H, W))
         
-        context_depth = img_feats_reshaped[2]
+
+        dummy_input = 0
+        target_size = img_feats_reshaped[-2].shape[-2:]  # H, W
+        for feat in img_feats_reshaped:
+            B, N, C, H, W = feat.shape
+            feat_reshaped = feat.view(B * N, C, H, W)
+            feat_interp = F.interpolate(feat_reshaped, size=target_size, mode='bilinear', align_corners=False)
+            feat_interp = feat_interp.view(B, N, C, *target_size)
+            dummy_input += feat_interp
+
+        context_depth = img_feats_reshaped[-2] + dummy_input * 0
         cam_params = img_inputs[1:7]
+        # B, NT, _, _, _ = context_depth.shape
+        # N = 6
+        # T = NT // N
+        # bev_feat = torch.zeros([B, T, 80, 100, 100, 8], device=context_depth.device) # B, TN, GC, H, W, Z
+
+        # for t in range(T):
         mlp_input = self.depth_net.get_mlp_input(*cam_params)
         
         context_depth, depth = self.depth_net(context_depth, mlp_input)
+        
         bev_feat = self.forward_projection(cam_params, context_depth, depth)
         
         return img_feats_reshaped, bev_feat, depth
 
+    def bev_forward_pts_train(self,
+                          pts_feats,
+                          gt_bboxes_3d,
+                          gt_labels_3d,
+                          img_metas,
+                          gt_bboxes_ignore=None):
+        """Forward function for point cloud branch.
+
+        Args:
+            pts_feats (list[torch.Tensor]): Features of point cloud branch
+            gt_bboxes_3d (list[:obj:`BaseInstance3DBoxes`]): Ground truth
+                boxes for each sample.
+            gt_labels_3d (list[torch.Tensor]): Ground truth labels for
+                boxes of each sampole
+            img_metas (list[dict]): Meta information of samples.
+            gt_bboxes_ignore (list[torch.Tensor], optional): Ground truth
+                boxes to be ignored. Defaults to None.
+
+        Returns:
+            dict: Losses of each branch.
+        """
+        outs = self.bev_pts_bbox_head(pts_feats)
+        loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
+        losses = self.bev_pts_bbox_head.loss(*loss_inputs)
+        return losses
+    
     def forward_pts_train(self,
                           pts_feats,
                           gt_bboxes_3d,
@@ -415,20 +479,33 @@ class SparseBEV(MVXTwoStageDetector):
         Returns:
             dict: Losses of different branches.
         """
-        img_feats, bev_feat, depth = self.extract_feat(img, img_metas, img_inputs)
+        img_feats, bev_feat, depth = self.extract_feat(img, img_metas, img_inputs, gt_depth)
         
         bev_feat = self.fuse_history(bev_feat, img_metas, img_inputs[6])
+        bev_feat = self.bev_encoder(bev_feat)
+
+        # losses_pts = self.bev_forward_pts_train([feat.mean(-1) for feat in bev_feat], gt_bboxes_3d,
+        #                                     gt_labels_3d, img_metas,
+        #                                     gt_bboxes_ignore)
+        if self.with_specific_component('occupancy_head'):
+            gt_occupancy = torch.concat([occ['gt_occupancy'].unsqueeze(0) for occ in img_metas])
+            losses_occupancy = self.occupancy_head.forward_train(bev_feat, results=None, gt_occupancy=gt_occupancy.to(bev_feat[0].device), gt_occupancy_flow=None)
 
         for i in range(len(img_metas)):
             img_metas[i]['gt_bboxes_3d'] = gt_bboxes_3d[i]
             img_metas[i]['gt_labels_3d'] = gt_labels_3d[i]
 
-        losses = self.forward_pts_train(img_feats, gt_bboxes_3d, gt_labels_3d, img_metas, gt_bboxes_ignore, bev_feat.mean(-1))
+        losses = dict()
+        if self.with_specific_component('pts_bbox_head'):
+            losses = self.forward_pts_train(img_feats, gt_bboxes_3d, gt_labels_3d, img_metas, gt_bboxes_ignore, bev_feat)
         loss_depth = self.depth_net.get_depth_loss(gt_depth, depth)
         losses.update(loss_depth)
+        losses.update(losses_occupancy)
+
         return losses
 
     def forward_test(self, img_metas, img=None, **kwargs):
+        # self.do_history = True
         for var, name in [(img_metas, 'img_metas')]:
             if not isinstance(var, list):
                 raise TypeError('{} must be a list, but got {}'.format(
@@ -454,15 +531,70 @@ class SparseBEV(MVXTwoStageDetector):
         else:  # offline
             return self.simple_test_offline(img_metas, img, rescale, img_inputs[0])
 
+    def bev_simple_test_pts(self, x, img_metas, rescale=False):
+        """Test function of point cloud branch."""
+        outs = self.bev_pts_bbox_head(x)
+        bbox_list = self.bev_pts_bbox_head.get_bboxes(
+            outs, img_metas, rescale=rescale)
+        bbox_results = [
+            bbox3d2result(bboxes, scores, labels)
+            for bboxes, scores, labels in bbox_list
+        ]
+        return bbox_results
+    
+
     def simple_test_offline(self, img_metas, img=None, rescale=False, img_inputs=None):
         img_feats, bev_feat, depth = self.extract_feat(img=img, img_metas=img_metas, img_inputs = img_inputs)
 
         bev_feat = self.fuse_history(bev_feat, img_metas, img_inputs[6])
+        bev_feat = self.bev_encoder(bev_feat)
+
+        if self.with_specific_component('occupancy_head'):
+            
+            pred_occupancy = self.occupancy_head(bev_feat, results=None)['output_voxels'][0]
+
+            pred_occupancy = pred_occupancy.permute(0, 2, 3, 4, 1)[0]
+           
+            pred_occupancy = pred_occupancy[..., 1:]     
+            pred_occupancy = pred_occupancy.softmax(-1)
+
+
+            # convert to CVPR2023 Format
+            pred_occupancy = pred_occupancy.permute(3, 2, 0, 1)
+            pred_occupancy = torch.flip(pred_occupancy, [2])
+            pred_occupancy = torch.rot90(pred_occupancy, -1, [2, 3])
+            pred_occupancy = pred_occupancy.permute(2, 3, 1, 0)
+            
+            pred_occupancy_category = pred_occupancy.argmax(-1) 
+            
+            # # For test server
+            # if self.occupancy_save_path is not None:
+            #         scene_name = img_metas[0]['scene_name']
+            #         sample_token = img_metas[0]['sample_idx']
+            #         # mask_camera = visible_mask[0][0]
+            #         # masked_pred_occupancy = pred_occupancy[mask_camera].cpu().numpy()
+            #         save_pred_occupancy = pred_occupancy.argmax(-1).cpu().numpy()
+            #         save_path = os.path.join(self.occupancy_save_path, 'occupancy_pred', f'{sample_token}.npz')
+            #         np.savez_compressed(save_path, save_pred_occupancy.astype(np.uint8)) 
+
+            pred_occupancy_category= pred_occupancy_category.cpu().numpy()
+
+        else:
+            pred_occupancy_category =  None
+
+        iou = None
 
         bbox_list = [dict() for _ in range(len(img_metas))]
-        bbox_pts = self.simple_test_pts(img_feats, img_metas, rescale=rescale, bev_feat=bev_feat.mean(-1))
-        for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
-            result_dict['pts_bbox'] = pts_bbox
+        if self.with_specific_component('pts_bbox_head'):
+            bbox_pts = self.simple_test_pts(img_feats, img_metas, rescale=rescale, bev_feat=bev_feat)
+        else:
+            bbox_pts = [None for _ in range(len(img_metas))]
+            
+        for i, result_dict in enumerate(bbox_list):
+            result_dict['pts_bbox'] = bbox_pts[i]
+            result_dict['iou'] = iou
+            result_dict['pred_occupancy'] = pred_occupancy_category
+            result_dict['index'] = img_metas[0]['index']
 
         return bbox_list
 
@@ -534,3 +666,7 @@ class SparseBEV(MVXTwoStageDetector):
             result_dict['pts_bbox'] = pts_bbox
 
         return bbox_list
+
+    def with_specific_component(self, component_name):
+        """Whether the model owns a specific component"""
+        return getattr(self, component_name, None) is not None

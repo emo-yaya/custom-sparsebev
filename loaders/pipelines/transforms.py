@@ -364,7 +364,7 @@ class GlobalRotScaleTransImage(object):
         self.translation_std = translation_std
 
     def bev_transform(self, rotate_angle, scale_ratio):
-        rotate_angle = torch.tensor(rotate_angle / 180 * np.pi)
+        rotate_angle = torch.tensor(rotate_angle)
         rot_sin = torch.sin(rotate_angle)
         rot_cos = torch.cos(rotate_angle)
         rot_mat = torch.Tensor([[rot_cos, -rot_sin, 0], [rot_sin, rot_cos, 0],
@@ -393,7 +393,7 @@ class GlobalRotScaleTransImage(object):
         bda_mat[3, 3] = 1
         bda_rot = self.bev_transform(rot_angle, scale_ratio)
         bda_mat[:3, :3] = bda_rot
-        results['bda_mat'] = bda_mat
+        results['bda_rot'] = bda_rot
         
         return results
 

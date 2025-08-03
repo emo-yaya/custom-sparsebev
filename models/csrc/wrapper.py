@@ -9,7 +9,7 @@ except ImportError as e:
     print('Warning: failed to load one or more CUDA extensions, performance may be hurt.')
     print('Error message:', e)
     MSMV_CUDA = False
-
+MSMV_CUDA = False
 
 def msmv_sampling_pytorch(mlvl_feats, sampling_locations, scale_weights):
     """
@@ -37,6 +37,33 @@ def msmv_sampling_pytorch(mlvl_feats, sampling_locations, scale_weights):
 
     return final.permute(0, 2, 1, 3)
 
+def msmv_sampling_bev(bev_feats, sampling_locations, scale_weights):
+    """
+    value: [B, N, H1W1 + H2W2..., C]
+    sampling_locations: [B, Q, P, 3]
+    scale_weights: [B, Q, P, 4]
+    """
+    assert scale_weights.shape[-1] == len(bev_feats)
+
+    B, C, _, _, _, _ = bev_feats[0].shape
+    _, Q, P, _ = sampling_locations.shape
+
+    sampling_locations = sampling_locations * 2 - 1
+    sampling_locations = sampling_locations[:, :, :, None, :]  # [B, Q, P, 1, 3]
+
+    final = torch.zeros([B, C, Q, P], device=bev_feats[0].device)
+
+    for lvl, feat in enumerate(bev_feats):
+        # feat (B*T*G, C, N, H, W, Z)
+        feat = feat.permute(0, 1, 5, 3, 4, 2).squeeze(-1)
+        out = F.grid_sample(
+            feat, sampling_locations, mode='bilinear',
+            padding_mode='zeros', align_corners=True,
+        )[..., 0]  # [B, C, Q, P]
+        out = out * scale_weights[..., lvl].reshape(B, 1, Q, P)
+        final += out
+
+    return final.permute(0, 2, 1, 3)
 
 class MSMVSamplingC2345(torch.autograd.Function):
     @staticmethod

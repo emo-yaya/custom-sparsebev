@@ -124,7 +124,7 @@ torchrun --nproc_per_node 8 train.py --config configs/r50_nuimg_704x256.py
 Train SparseBEV with 4 GPUs (i.e the last four GPUs):
 
 ```
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 torchrun --nproc_per_node 4 train.py --config configs/r50_nuimg_704x256.py
 ```
 
@@ -136,7 +136,7 @@ Single-GPU evaluation:
 
 ```
 export CUDA_VISIBLE_DEVICES=0
-python val.py --config configs/r50_nuimg_704x256.py --weights checkpoints/r50_nuimg_704x256.pth
+python val.py --config configs/r50_nuimg_704x256.py --weights /home/ubuntu/custom-sparsebev/outputs/SparseBEV/2025-08-03/13-21-29/latest.pth
 ```
 
 Multi-GPU evaluation:

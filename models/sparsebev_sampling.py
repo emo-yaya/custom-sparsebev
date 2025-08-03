@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from .bbox.utils import decode_bbox
 from .utils import rotation_3d_in_axis, DUMP
-from .csrc.wrapper import msmv_sampling, msmv_sampling_pytorch
+from .csrc.wrapper import msmv_sampling, msmv_sampling_pytorch, msmv_sampling_bev
 
 
 def make_sample_points(query_bbox, offset, pc_range):
@@ -24,7 +24,7 @@ def make_sample_points(query_bbox, offset, pc_range):
     return sample_xyz  # [B, Q, P, 3]
 
 
-def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, image_w, eps=1e-5):
+def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, image_w, eps=1e-5, bev_feats=None, scale_weights_bev=None, pc_range=None ):
     """
     Args:
         sample_points: 3D sampling points in shape [B, Q, T, G, P, 3]
@@ -59,9 +59,13 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
     sample_points = sample_points.transpose(1, 3)   # [B, T, N, Q, GP, 4, 1]
 
     # project 3d sampling points to N views
+    identity_matrices = torch.eye(4, device=lidar2img.device).view(1,1,1,1,1,4,4)
+    identity_matrices = identity_matrices.expand(B, T, N, Q, G*P, 4, 4)  # [B, 4, 4]
+    sample_points_bev = torch.matmul(identity_matrices, sample_points).squeeze(-1)
     sample_points_cam = torch.matmul(lidar2img, sample_points).squeeze(-1)  # [B, T, N, Q, GP, 4]
 
     # homo coord -> pixel coord
+    
     homo = sample_points_cam[..., 2:3]
     homo_nonzero = torch.maximum(homo, torch.zeros_like(homo) + eps)
     sample_points_cam = sample_points_cam[..., 0:2] / homo_nonzero  # [B, T, N, Q, GP, 2]
@@ -70,12 +74,27 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
     sample_points_cam[..., 0] /= image_w
     sample_points_cam[..., 1] /= image_h
 
+    sample_points_bev = sample_points_bev[..., 0:3]
+    
+    sample_points_bev[..., 0] = (sample_points_bev[..., 0] - pc_range[0]) / (pc_range[3] - pc_range[0])
+    sample_points_bev[..., 1] = (sample_points_bev[..., 1] - pc_range[1]) / (pc_range[4] - pc_range[1])
+    sample_points_bev[..., 2] = (sample_points_bev[..., 2] - pc_range[2]) / (pc_range[5] - pc_range[2])
+
     # check if out of image
     valid_mask = ((homo > eps) \
         & (sample_points_cam[..., 1:2] > 0.0)
         & (sample_points_cam[..., 1:2] < 1.0)
         & (sample_points_cam[..., 0:1] > 0.0)
         & (sample_points_cam[..., 0:1] < 1.0)
+    ).squeeze(-1).float()  # [B, T, N, Q, GP]
+
+    valid_mask_bev = ( 
+        (sample_points_bev[..., 1:2] > 0.0)
+        & (sample_points_bev[..., 1:2] < 1.0)
+        & (sample_points_bev[..., 0:1] > 0.0)
+        & (sample_points_bev[..., 0:1] < 1.0)
+        & (sample_points_bev[..., 2:3] > 0.0)
+        & (sample_points_bev[..., 2:3] < 1.0)
     ).squeeze(-1).float()  # [B, T, N, Q, GP]
 
     # for visualization only
@@ -87,6 +106,8 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
 
     valid_mask = valid_mask.permute(0, 1, 3, 4, 2)  # [B, T, Q, GP, N]
     sample_points_cam = sample_points_cam.permute(0, 1, 3, 4, 2, 5)  # [B, T, Q, GP, N, 2]
+    valid_mask_bev = valid_mask_bev.permute(0, 1, 3, 4, 2)  # [B, T, Q, GP, N]
+    sample_points_bev = sample_points_bev.permute(0, 1, 3, 4, 2, 5)  # [B, T, Q, GP, N, 2]
 
     # prepare batched indexing
     i_batch = torch.arange(B, dtype=torch.long, device=sample_points.device)
@@ -100,28 +121,46 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
     
     # we only keep at most one valid sampling point, see https://zhuanlan.zhihu.com/p/654821380
     i_view = torch.argmax(valid_mask, dim=-1)[..., None]  # [B, T, Q, GP, 1]
+    i_view_bev = torch.argmax(valid_mask_bev, dim=-1)[..., None]  # [B, T, Q, GP, 1]
 
     # index the only one sampling point and its valid flag
     sample_points_cam = sample_points_cam[i_batch, i_time, i_query, i_point, i_view, :]  # [B, Q, GP, 1, 2]
     valid_mask = valid_mask[i_batch, i_time, i_query, i_point, i_view]  # [B, Q, GP, 1]
+    
+    # # TODO: bev dont have multi view？ how to process here
+    sample_points_bev = sample_points_bev[i_batch, i_time, i_query, i_point, i_view_bev, :]  # [B, Q, GP, 1, 3]
+    valid_mask_bev = valid_mask_bev[i_batch, i_time, i_query, i_point, i_view_bev]  # [B, Q, GP, 1]
 
     # treat the view index as a new axis for grid_sample and normalize the view index to [0, 1]
     sample_points_cam = torch.cat([sample_points_cam, i_view[..., None].float() / (N - 1)], dim=-1)
+    # TODO: bev xyz  cam xy view？ how to process here
+    # sample_points_bev = sample_points_bev
 
     # reorganize the tensor to stack T and G to the batch dim for better parallelism
     sample_points_cam = sample_points_cam.reshape(B, T, Q, G, P, 1, 3)
     sample_points_cam = sample_points_cam.permute(0, 1, 3, 2, 4, 5, 6)  # [B, T, G, Q, P, 1, 3]
     sample_points_cam = sample_points_cam.reshape(B*T*G, Q, P, 3)
 
+    sample_points_bev = sample_points_bev.reshape(B, T, Q, G, P, 1, 3)
+    sample_points_bev = sample_points_bev.permute(0, 1, 3, 2, 4, 5, 6)  # [B, T, G, Q, P, 1, 3]
+    sample_points_bev = sample_points_bev.reshape(B*T*G, Q, P, 3)
+
     # reorganize the tensor to stack T and G to the batch dim for better parallelism
     scale_weights = scale_weights.reshape(B, Q, G, T, P, -1)
     scale_weights = scale_weights.permute(0, 2, 3, 1, 4, 5)
     scale_weights = scale_weights.reshape(B*G*T, Q, P, -1)
+    scale_weights_bev = scale_weights_bev.reshape(B, Q, G, T, P, -1)
+    scale_weights_bev = scale_weights_bev.permute(0, 2, 3, 1, 4, 5)
+    scale_weights_bev = scale_weights_bev.reshape(B*G*T, Q, P, -1)
 
     sample_points_cam = sample_points_cam.contiguous()
     scale_weights = scale_weights.contiguous()
+
+    sample_points_bev = sample_points_bev.contiguous()
+    scale_weights_bev = scale_weights_bev.contiguous()
     # multi-scale multi-view grid sample
     final = msmv_sampling(mlvl_feats, sample_points_cam, scale_weights)
+    final_bev = msmv_sampling_bev(bev_feats, sample_points_bev, scale_weights_bev)
 
     # reorganize the sampled features
     C = final.shape[2]  # [BTG, Q, C, P]
@@ -129,4 +168,8 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
     final = final.permute(0, 3, 2, 1, 5, 4)
     final = final.flatten(3, 4)  # [B, Q, G, FP, C]
 
-    return final
+    final_bev = final_bev.reshape(B, T, G, Q, C, P)
+    final_bev = final_bev.permute(0, 3, 2, 1, 5, 4)
+    final_bev = final_bev.flatten(3, 4)  # [B, Q, G, FP, C]
+
+    return final, final_bev

@@ -48,9 +48,9 @@ img_norm_cfg = dict(
     std=[58.395, 57.120, 57.375],
     to_rgb=True)
 grid_config = {
-    'x': [-51.2, 51.2, 1.024],
-    'y': [-51.2, 51.2, 1.024],
-    'z': [-3, 5, 1],
+    'x': [-51.2, 51.2, 0.8],
+    'y': [-51.2, 51.2, 0.8],
+    'z': [-3, 5, 8],
     'depth': [2.0, 60.0, 1],
 } 
 
@@ -60,9 +60,6 @@ numC_Trans = 80
 voxel_out_channel = 256
 voxel_channels = [64, 64*2, 64*4]
 voxel_out_indices = (0, 1, 2)
-occ_size = [200, 200, 16]
-empty_idx = 18 
-num_cls = 19  
 
 model = dict(
     type='SparseBEV',
@@ -108,23 +105,61 @@ model = dict(
         out_channels=voxel_out_channel,
         norm_cfg=dict(type='SyncBN', requires_grad=True),
     ),
-    occupancy_head= dict(
-        type='OccHead',
-        with_cp=use_checkpoint,
-        use_focal_loss=True,
-        norm_cfg=dict(type='SyncBN', requires_grad=True),
-        soft_weights=True,
-        final_occ_size=occ_size,
-        empty_idx=empty_idx,
-        num_level=len(voxel_out_indices),
-        in_channels=[voxel_out_channel] * len(voxel_out_indices),
-        out_channel=num_cls,
-        point_cloud_range=point_cloud_range,
-        loss_weight_cfg=dict(
-            loss_voxel_ce_weight=1.0,
-            loss_voxel_sem_scal_weight=1.0,
-            loss_voxel_geo_scal_weight=1.0,
-            loss_voxel_lovasz_weight=1.0,
+    bev_pts_bbox_head=dict(
+        type='CenterHead',
+        in_channels=256,
+        tasks=[
+            dict(num_class=10, class_names=['car', 'truck',
+                                            'construction_vehicle',
+                                            'bus', 'trailer',
+                                            'barrier',
+                                            'motorcycle', 'bicycle',
+                                            'pedestrian', 'traffic_cone']),
+        ],
+        common_heads=dict(
+            reg=(2, 2), height=(1, 2), dim=(3, 2), rot=(2, 2), vel=(2, 2)),
+        share_conv_channel=64,
+        bbox_coder=dict(
+            type='CenterPointBBoxCoder',
+            pc_range=point_cloud_range[:2],
+            post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
+            max_num=500,
+            score_threshold=0.1,
+            out_size_factor=8,
+            voxel_size=voxel_size[:2],
+            code_size=9),
+        separate_head=dict(
+            type='SeparateHead', init_bias=-2.19, final_kernel=3),
+        loss_cls=dict(type='GaussianFocalLoss', reduction='mean'),
+        loss_bbox=dict(type='L1Loss', reduction='mean', loss_weight=0.25),
+        norm_bbox=True,
+        train_cfg=dict(
+            point_cloud_range=point_cloud_range,
+            grid_size=[512, 512, 1],
+            voxel_size=voxel_size,
+            out_size_factor=4,
+            dense_reg=1,
+            gaussian_overlap=0.1,
+            max_objs=500,
+            min_radius=2,
+            code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2]),
+        test_cfg=dict(
+            pc_range=point_cloud_range[:2],
+            post_center_limit_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
+            max_per_img=500,
+            max_pool_nms=False,
+            min_radius=[4, 12, 10, 1, 0.85, 0.175],
+            score_threshold=0.1,
+            out_size_factor=4,
+            voxel_size=voxel_size[:2],
+            pre_max_size=1000,
+            post_max_size=500,
+
+            # Scale-NMS
+            nms_type='circle',
+            nms_thr=0.2,
+            nms_rescale_factor=[[1.0, 0.7, 0.7, 0.4, 0.55,
+                                 1.1, 1.0, 1.0, 1.5, 3.5]]
         ),
     ),
     pts_bbox_head=dict(
@@ -170,9 +205,9 @@ model = dict(
         loss_iou=dict(type='GIoULoss', loss_weight=0.0)),
     train_cfg=dict(pts=dict(
         grid_size=[512, 512, 1],
-        voxel_size=voxel_size,
-        point_cloud_range=point_cloud_range,
-        out_size_factor=4,
+        # voxel_size=voxel_size,
+        # point_cloud_range=point_cloud_range,
+        # out_size_factor=4,
         assigner=dict(
             type='HungarianAssigner3D',
             cls_cost=dict(type='FocalLossCost', weight=2.0),
@@ -191,10 +226,6 @@ ida_aug_conf = {
     'rand_flip': True,
 }
 data_config = {}
-occupancy_path = 'data/nuscenes/gts'
-fix_void = True
-
-
 bda_aug_conf = dict()
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=False, color_type='color'),
@@ -203,7 +234,7 @@ train_pipeline = [
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectNameFilter', classes=class_names),
     dict(type='RandomTransformImage', ida_aug_conf=ida_aug_conf, training=True),
-    dict(type='GlobalRotScaleTransImage', rot_range=[-0, 0], scale_ratio_range=[1, 1]),
+    dict(type='GlobalRotScaleTransImage', rot_range=[-0.3925, 0.3925], scale_ratio_range=[1, 1]),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
     dict(
         type='PrepareImageInputs',
@@ -221,10 +252,9 @@ train_pipeline = [
         use_dim=5,
         file_client_args=dict(backend='disk')),
     dict(type='PointToMultiViewDepth', downsample=1, grid_config=grid_config),
-    dict(type='LoadOccupancy', ignore_nonvisible=True, fix_void=fix_void, occupancy_path=occupancy_path),
     dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'img_inputs', 'gt_depth'], meta_keys=(
         'filename', 'ori_shape', 'img_shape', 'pad_shape', 'lidar2img', 'img_timestamp',
-                'sequence_group_idx', 'curr_to_prev_ego_rt','start_of_sequence',  'gt_occupancy'))
+                'sequence_group_idx', 'curr_to_prev_ego_rt','start_of_sequence',))
 ]
 
 test_pipeline = [
@@ -237,7 +267,6 @@ test_pipeline = [
         bda_aug_conf=bda_aug_conf,
         classes=class_names,
         is_train=False),
-    dict(type='LoadOccupancy',  occupancy_path=occupancy_path),
     dict(
         type='MultiScaleFlipAug3D',
         img_scale=(1600, 900),
@@ -248,7 +277,7 @@ test_pipeline = [
             dict(type='Collect3D', keys=['img', 'img_inputs'], meta_keys=(
                 'filename', 'box_type_3d', 'ori_shape', 'img_shape', 'pad_shape',
                 'lidar2img', 'img_timestamp', 
-                'sequence_group_idx', 'curr_to_prev_ego_rt','start_of_sequence',  'gt_occupancy', 'index'))
+                'sequence_group_idx', 'curr_to_prev_ego_rt','start_of_sequence',))
         ])
 ]
 
@@ -309,7 +338,7 @@ lr_config = dict(
     min_lr_ratio=1e-3
 )
 total_epochs = 24
-batch_size = 4
+batch_size = 8
 
 # load pretrained weights
 load_from = 'pretrain/fbocc-r50-cbgs_depth_16f_16x4_20e.pth'

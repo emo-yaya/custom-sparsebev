@@ -5,7 +5,7 @@ from mmdet.datasets import DATASETS
 from mmdet3d.datasets import NuScenesDataset
 from pyquaternion import Quaternion
 import torch
-
+from tqdm import tqdm
 
 def nuscenes_get_rt_matrix(
     src_sample,
@@ -221,6 +221,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         input_dict = dict(
             index=index,
             sample_idx=info['token'],
+            scene_name=info['scene_name'],
             pts_filename=info['lidar_path'],
             sweeps={'prev': sweeps_prev, 'next': sweeps_next},
             sweeps_fbbev=info['sweeps'],
@@ -285,3 +286,122 @@ class CustomNuScenesDataset(NuScenesDataset):
             input_dict['ann_info'] = annos
 
         return input_dict
+    
+
+    def evaluate_occupancy(self, occ_results, runner=None, show_dir=None, save=False, **eval_kwargs):
+        from .occ_metrics import Metric_mIoU, Metric_FScore
+        import mmcv
+        from os import path as osp
+
+        if show_dir is not None:
+            # import os
+            # if not os.path.exists(show_dir):
+
+            mmcv.mkdir_or_exist(show_dir)
+            mmcv.mkdir_or_exist(os.path.join(show_dir, 'occupancy_pred'))
+            print('\nSaving output and gt in {} for visualization.'.format(show_dir))
+            begin= 0 # eval_kwargs.get('begin',None)
+
+            end=1 if not save else len(occ_results) # eval_kwargs.get('end',None)
+        self.occ_eval_metrics = Metric_mIoU(
+            num_classes=18,
+            use_lidar_mask=False,
+            use_image_mask=True)
+        
+        self.eval_fscore = False
+        if  self.eval_fscore:
+            self.fscore_eval_metrics = Metric_FScore(
+                leaf_size=10,
+                threshold_acc=0.4,
+                threshold_complete=0.4,
+                voxel_size=[0.4, 0.4, 0.4],
+                range=[-40, -40, -1, 40, 40, 5.4],
+                void=[17, 255],
+                use_lidar_mask=False,
+                use_image_mask=True,
+            )
+        count = 0
+        print('\nStarting Evaluation...')
+        processed_set = set()
+        for occ_pred_w_index in tqdm(occ_results):
+            index = occ_pred_w_index['index']
+            if index in processed_set: continue
+            processed_set.add(index)
+
+            occ_pred = occ_pred_w_index['pred_occupancy']
+            info = self.data_infos[index]
+            scene_name = info['scene_name']
+            sample_token = info['token']
+            occupancy_file_path = osp.join('data/nuscenes/gts', scene_name, sample_token, 'labels.npz')
+            occ_gt = np.load(occupancy_file_path)
+ 
+            gt_semantics = occ_gt['semantics']
+            mask_lidar = occ_gt['mask_lidar'].astype(bool)
+            mask_camera = occ_gt['mask_camera'].astype(bool)            
+            # if show_dir is not None:
+            #     if begin is not None and end is not None:
+            #         if index>= begin and index<end:
+            #             sample_token = info['token']
+            #             count += 1
+            #             save_path = os.path.join(show_dir, 'occupancy_pred', scene_name+'_'+sample_token)
+            #             np.savez_compressed(save_path, pred=occ_pred[mask_camera], gt=occ_gt, sample_token=sample_token)
+            #             with open(os.path.join(show_dir, 'occupancy_pred', 'file.txt'),'a') as f:
+            #                 f.write(save_path+'\n')
+                        # np.savez_compressed(save_path+'_gt', pred= occ_gt['semantics'], gt=occ_gt, sample_token=sample_token)
+                # else:
+                #     sample_token=info['token']
+                #     save_path=os.path.join(show_dir,str(index).zfill(4))
+                #     np.savez_compressed(save_path,pred=occ_pred,gt=occ_gt,sample_token=sample_token)
+
+
+            self.occ_eval_metrics.add_batch(occ_pred[mask_camera], gt_semantics, mask_lidar, mask_camera)
+            if self.eval_fscore:
+                self.fscore_eval_metrics.add_batch(occ_pred[mask_camera], gt_semantics, mask_lidar, mask_camera)
+   
+        res = self.occ_eval_metrics.count_miou()
+        if self.eval_fscore:
+            res.update(self.fscore_eval_metrics.count_fscore())
+        
+        return res 
+
+
+    def evaluate(self,
+                results,
+                metric='bbox',
+                logger=None,
+                jsonfile_prefix=None,
+                result_names=['pts_bbox'],
+                show=False,
+                out_dir=None,
+                pipeline=None):
+        import copy
+        info_list = []
+        results_copy = copy.deepcopy(results)
+        for result in results:
+            info = dict()
+
+            info['iou'] = result.pop('iou')
+            info['pred_occupancy'] = result.pop('pred_occupancy')
+            info['index'] = result.pop('index')
+            
+            info_list.append(info)
+        
+        results_dict = dict()
+
+        # results_dict = super().evaluate(
+        #     results,
+        #     metric=metric,
+        #     logger=logger,
+        #     jsonfile_prefix=jsonfile_prefix,
+        #     result_names=['pts_bbox'],
+        #     show=show,
+        #     out_dir=out_dir,
+        #     pipeline=pipeline
+        # )
+        results = info_list
+        
+        if results[0].get('pred_occupancy', None) is not None:
+            occupancy_result = self.evaluate_occupancy(results, show_dir=jsonfile_prefix, save=False)
+            results_dict.update(occupancy_result)
+
+        return results_dict

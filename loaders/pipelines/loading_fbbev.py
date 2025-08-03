@@ -28,6 +28,90 @@ def mmlabNormalize(img, mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.3
     img = torch.tensor(img).float().permute(2, 0, 1).contiguous()
     return img
 
+
+@PIPELINES.register_module()
+class LoadOccupancy(object):
+    """Load an image from file in monocular 3D object detection. Compared to 2D
+    detection, additional camera parameters need to be loaded.
+
+    Args:
+        kwargs (dict): Arguments are the same as those in
+            :class:`LoadImageFromFile`.
+    """
+
+    def __init__(self, occupancy_path='/mount/dnn_data/occupancy_2023/gts',
+                    num_classes=17,
+                    ignore_nonvisible=False,
+                    mask='mask_camera',
+                    ignore_classes=[],
+                    fix_void=True) :
+        self.occupancy_path = occupancy_path
+        self.num_classes = num_classes
+        self.ignore_nonvisible = ignore_nonvisible
+        self.mask = mask
+
+        self.ignore_classes=ignore_classes
+
+        self.fix_void = fix_void
+
+
+    def __call__(self, results):
+        """Call functions to load image and get image meta information.
+
+        Args:
+            results (dict): Result dict from :obj:`mmdet.CustomDataset`.
+
+        Returns:
+            dict: The dict contains loaded image and meta information.
+        """
+
+        scene_name = results['scene_name']
+        sample_token = results['sample_idx']
+
+
+        occupancy_file_path = osp.join(self.occupancy_path, scene_name, sample_token, 'labels.npz')
+        data = np.load(occupancy_file_path)
+        occupancy = torch.tensor(data['semantics'])
+        visible_mask = torch.tensor(data[self.mask])
+        # visible_mask_lidar = data['mask_lidar']
+
+        if self.ignore_nonvisible:
+            occupancy[~visible_mask.to(torch.bool)] = 255
+
+
+        # to BEVDet format
+        occupancy = occupancy.permute(2, 0, 1)
+        occupancy = torch.rot90(occupancy, 1, [1, 2])
+        occupancy = torch.flip(occupancy, [1])
+        occupancy = occupancy.permute(1, 2, 0)
+
+        
+        if self.fix_void:
+            occupancy[occupancy<255] = occupancy[occupancy<255] + 1
+
+        for class_ in self.ignore_classes:
+            occupancy[occupancy==class_] = 255
+
+        # if results['rotate_bda'] != 0:
+        #     occupancy = occupancy.permute(2, 0, 1)
+        #     occupancy = rotate(occupancy, -results['rotate_bda'], fill=255).permute(1, 2, 0)
+
+        # if results['flip_dx']:
+        #     occupancy = torch.flip(occupancy, [1])
+
+        # if results['flip_dy']:
+        #     occupancy = torch.flip(occupancy, [0])
+
+
+
+        results['gt_occupancy'] = occupancy
+        results['visible_mask'] = visible_mask
+        
+        results['visible_mask_bev'] = (occupancy==255).sum(-1)
+
+        return results
+
+
 @PIPELINES.register_module()
 class LoadPointsFromFile(object):
     """Load Points From File.
@@ -553,8 +637,8 @@ class LoadAnnotationsBEVDepth(object):
         
         
         if self.is_train:
-            bda_mat = results['bda_mat']
-       
+            bda_rot = results['bda_rot']
+            
         imgs, rots, trans, intrins = results['img_inputs'][:4]
         post_rots, post_trans = results['img_inputs'][4:]
 

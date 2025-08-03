@@ -59,6 +59,7 @@ class MyTextLoggerHook(TextLoggerHook):
             log_str = f'Iter [{log_dict["iter"]}/{runner.max_iters}] '
 
         log_str += 'loss: %.2f, ' % log_dict['loss']
+        log_str += 'loss_depth: %.2f, ' % log_dict['loss_depth']
 
         if 'time' in log_dict.keys():
             # MOD: skip the first iteration since it's not accurate
