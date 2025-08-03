@@ -589,12 +589,14 @@ class SparseBEV(MVXTwoStageDetector):
             bbox_pts = self.simple_test_pts(img_feats, img_metas, rescale=rescale, bev_feat=bev_feat)
         else:
             bbox_pts = [None for _ in range(len(img_metas))]
-            
+
         for i, result_dict in enumerate(bbox_list):
             result_dict['pts_bbox'] = bbox_pts[i]
-            result_dict['iou'] = iou
-            result_dict['pred_occupancy'] = pred_occupancy_category
-            result_dict['index'] = img_metas[0]['index']
+            
+            if self.with_specific_component('occupancy_head'):
+                result_dict['iou'] = iou
+                result_dict['pred_occupancy'] = pred_occupancy_category
+                result_dict['index'] = img_metas[0]['index']
 
         return bbox_list
 

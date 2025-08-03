@@ -153,7 +153,7 @@ def main():
 
     if cfgs.eval_config['interval'] > 0:
         if world_size > 1:
-            runner.register_hook(DistEvalHook(val_loader, interval=cfgs.eval_config['interval'], gpu_collect=False))
+            runner.register_hook(DistEvalHook(val_loader, interval=cfgs.eval_config['interval'], gpu_collect=True))
         else:
             runner.register_hook(EvalHook(val_loader, interval=cfgs.eval_config['interval']))
 

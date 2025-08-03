@@ -388,16 +388,16 @@ class CustomNuScenesDataset(NuScenesDataset):
         
         results_dict = dict()
 
-        # results_dict = super().evaluate(
-        #     results,
-        #     metric=metric,
-        #     logger=logger,
-        #     jsonfile_prefix=jsonfile_prefix,
-        #     result_names=['pts_bbox'],
-        #     show=show,
-        #     out_dir=out_dir,
-        #     pipeline=pipeline
-        # )
+        results_dict = super().evaluate(
+            results,
+            metric=metric,
+            logger=logger,
+            jsonfile_prefix=jsonfile_prefix,
+            result_names=['pts_bbox'],
+            show=show,
+            out_dir=out_dir,
+            pipeline=pipeline
+        )
         results = info_list
         
         if results[0].get('pred_occupancy', None) is not None:
