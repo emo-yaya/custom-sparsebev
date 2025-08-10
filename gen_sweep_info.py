@@ -42,6 +42,13 @@ def get_cam_info(nusc, sample_data):
 
 
 def add_sweep_info(nusc, sample_infos):
+
+    token2info = {}
+    for info in sample_infos['infos']:
+        # info 里常见键名有 'token' 或 'sample_token'
+        token2info[info['token']] = info
+
+
     for curr_id in tqdm.tqdm(range(len(sample_infos['infos']))):
         sample = nusc.get('sample', sample_infos['infos'][curr_id]['token'])
 
@@ -71,8 +78,10 @@ def add_sweep_info(nusc, sample_infos):
             # del sample_infos['infos'][curr_id]['cams'][cam]['ego2global_rotation']
 
         sweep_infos = []
+        sweep_infos_gt = []
+        sample_cur = sample
         if sample['prev'] != '':  # add sweep frame between two key frame
-            for _ in range(5):
+            for idx in range(5):
                 sweep_info = dict()
                 for cam in cam_types:
                     if curr_cams[cam]['prev'] == '':
@@ -82,9 +91,18 @@ def add_sweep_info(nusc, sample_infos):
                     sweep_cam = get_cam_info(nusc, sample_data)
                     curr_cams[cam] = sample_data
                     sweep_info[cam] = sweep_cam
+                if sample_cur['prev'] == '':
+                    sweep_info_gt = sweep_infos_gt[-1]
+                else:
+                    sample_prev = nusc.get('sample', sample_cur['prev'])
+                    sweep_info_gt = token2info.get(sample_prev['token'])['gt_boxes']
+                    sample_cur = sample_prev
+                    
+                sweep_infos_gt.append(sweep_info_gt)
                 sweep_infos.append(sweep_info)
 
         sample_infos['infos'][curr_id]['sweeps'] = sweep_infos
+        sample_infos['infos'][curr_id]['sweeps_gts'] = sweep_infos_gt
 
     return sample_infos
 
