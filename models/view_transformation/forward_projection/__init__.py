@@ -1,1 +1,2 @@
 from .view_transformer import LSSViewTransformerFunction, LSSViewTransformerFunction3D
+from .view_transformer_bevdet import LSSViewTransformer

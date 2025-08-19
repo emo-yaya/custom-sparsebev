@@ -108,25 +108,6 @@ model = dict(
         out_channels=voxel_out_channel,
         norm_cfg=dict(type='SyncBN', requires_grad=True),
     ),
-    occupancy_head= dict(
-        type='OccHead',
-        with_cp=use_checkpoint,
-        use_focal_loss=True,
-        norm_cfg=dict(type='SyncBN', requires_grad=True),
-        soft_weights=True,
-        final_occ_size=occ_size,
-        empty_idx=empty_idx,
-        num_level=len(voxel_out_indices),
-        in_channels=[voxel_out_channel] * len(voxel_out_indices),
-        out_channel=num_cls,
-        point_cloud_range=point_cloud_range,
-        loss_weight_cfg=dict(
-            loss_voxel_ce_weight=1.0,
-            loss_voxel_sem_scal_weight=1.0,
-            loss_voxel_geo_scal_weight=1.0,
-            loss_voxel_lovasz_weight=1.0,
-        ),
-    ),
     pts_bbox_head=dict(
         type='SparseBEVHead',
         num_classes=10,
@@ -309,7 +290,7 @@ lr_config = dict(
     min_lr_ratio=1e-3
 )
 total_epochs = 24
-batch_size = 4
+batch_size = 1
 
 # load pretrained weights
 load_from = 'pretrain/fbocc-r50-cbgs_depth_16f_16x4_20e.pth'

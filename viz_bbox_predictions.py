@@ -161,7 +161,7 @@ def main():
         cfgs.merge_from_dict(args.override)
 
     # use val-mini for visualization
-    cfgs.data.val.ann_file = cfgs.data.val.ann_file.replace('val', 'val_mini')
+    # cfgs.data.val.ann_file = cfgs.data.val.ann_file.replace('val', 'val_mini')
 
     # register custom module
     importlib.import_module('models')

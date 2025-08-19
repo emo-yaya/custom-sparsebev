@@ -309,7 +309,7 @@ lr_config = dict(
     min_lr_ratio=1e-3
 )
 total_epochs = 24
-batch_size = 4
+batch_size = 8
 
 # load pretrained weights
 load_from = 'pretrain/fbocc-r50-cbgs_depth_16f_16x4_20e.pth'
@@ -331,7 +331,7 @@ log_config = dict(
 )
 
 # evaluation
-eval_config = dict(interval=1)
+eval_config = dict(interval=24)
 
 # other flags
 debug = True

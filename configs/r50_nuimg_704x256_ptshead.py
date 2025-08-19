@@ -66,9 +66,9 @@ use_checkpoint = True
 model = dict(
     type='SparseBEV',
     data_aug=dict(
-        # img_color_aug=True,  # Move some augmentations to GPU
-        # img_norm_cfg=img_norm_cfg,
-        # img_pad_cfg=dict(size_divisor=32)
+        img_color_aug=True,  # Move some augmentations to GPU
+        img_norm_cfg=img_norm_cfg,
+        img_pad_cfg=dict(size_divisor=32)
     ),
     stop_prev_grad=0,
     img_backbone=img_backbone,
@@ -204,7 +204,8 @@ train_pipeline = [
     dict(type='ObjectNameFilter', classes=class_names),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
     dict(
-        type='Collect3D', keys=['img_inputs', 'gt_bboxes_3d', 'gt_labels_3d'])
+        type='Collect3D', keys=['img_inputs', 'gt_bboxes_3d', 'gt_labels_3d'], meta_keys=(
+            'sequence_group_idx', 'curr_to_prev_ego_rt','start_of_sequence'))
 ]
 
 test_pipeline = [
@@ -230,7 +231,10 @@ test_pipeline = [
                 type='DefaultFormatBundle3D',
                 class_names=class_names,
                 with_label=False),
-            dict(type='Collect3D', keys=['points', 'img_inputs'])
+            dict(type='Collect3D', keys=['points', 'img_inputs'], meta_keys=(
+                'flip', 'pcd_horizontal_flip', 'pcd_vertical_flip', 'box_mode_3d', 'box_type_3d',
+                'sample_idx', 'pcd_scale_factor', 'pts_filename', 'input_shape',
+                'sequence_group_idx', 'curr_to_prev_ego_rt','start_of_sequence'))
         ])
 ]
 
@@ -239,33 +243,30 @@ data = dict(
     train=dict(
         type=dataset_type,
         data_root=dataset_root,
-        ann_file=dataset_root + 'bevdetv3-nuscenes_infos_train.pkl',
+        ann_file=dataset_root + 'nuscenes_infos_train_sweep.pkl',
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
         test_mode=False,
         use_valid_flag=True,
-        img_info_prototype='bevdet',
         box_type_3d='LiDAR'),
     val=dict(
         type=dataset_type,
         data_root=dataset_root,
-        ann_file=dataset_root + 'bevdetv3-nuscenes_infos_val.pkl',
+        ann_file=dataset_root + 'nuscenes_infos_val_sweep.pkl',
         pipeline=test_pipeline,
         classes=class_names,
         modality=input_modality,
         test_mode=True,
-        img_info_prototype='bevdet',
         box_type_3d='LiDAR'),
     test=dict(
         type=dataset_type,
         data_root=dataset_root,
-        ann_file=dataset_root + 'bevdetv3-nuscenes_infos_val.pkl',
+        ann_file=dataset_root + 'nuscenes_infos_val_sweep.pkl',
         pipeline=test_pipeline,
         classes=class_names,
         modality=input_modality,
         test_mode=True,
-        img_info_prototype='bevdet',
         box_type_3d='LiDAR')
 )
 

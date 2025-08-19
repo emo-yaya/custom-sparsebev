@@ -58,3 +58,4 @@ models.egg-info/requires.txt
 models.egg-info/SOURCES.txt
 models.egg-info/top_level.txt
 mmdet3d/.mim/configs
+nohup.out

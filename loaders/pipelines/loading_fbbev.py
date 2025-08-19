@@ -642,8 +642,16 @@ class LoadAnnotationsBEVDepth(object):
         imgs, rots, trans, intrins = results['img_inputs'][:4]
         post_rots, post_trans = results['img_inputs'][4:]
 
-        results['img_inputs'] = (imgs, rots, trans, intrins, post_rots,
-                                 post_trans, bda_rot)
+        B = rots.shape[0]   # batch size
+        rots_4x4 = torch.eye(4, device=rots.device, dtype=rots.dtype).unsqueeze(0).repeat(B, 1, 1)
+        rots_4x4[:, :3, :3] = rots
+
+        # B = bda_rot.shape[0]   # batch size
+        bda_rot_4x4 = torch.eye(4, device=bda_rot.device, dtype=bda_rot.dtype)
+        # bda_rot_4x4[:, :3, :3] = bda_rot
+        bda_rot_4x4[:3, :3] = bda_rot
+        results['img_inputs'] = (imgs, rots_4x4, trans, intrins, post_rots,
+                                 post_trans, bda_rot_4x4)
         
         # results['flip_dx'] = flip_dx
         # results['flip_dy'] = flip_dy

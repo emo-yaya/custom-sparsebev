@@ -7,7 +7,37 @@ import argparse
 import numpy as np
 from nuscenes import NuScenes
 from pyquaternion import Quaternion
+from nuscenes.utils.data_classes import Box
 
+map_name_from_general_to_detection = {
+    'human.pedestrian.adult': 'pedestrian',
+    'human.pedestrian.child': 'pedestrian',
+    'human.pedestrian.wheelchair': 'ignore',
+    'human.pedestrian.stroller': 'ignore',
+    'human.pedestrian.personal_mobility': 'ignore',
+    'human.pedestrian.police_officer': 'pedestrian',
+    'human.pedestrian.construction_worker': 'pedestrian',
+    'animal': 'ignore',
+    'vehicle.car': 'car',
+    'vehicle.motorcycle': 'motorcycle',
+    'vehicle.bicycle': 'bicycle',
+    'vehicle.bus.bendy': 'bus',
+    'vehicle.bus.rigid': 'bus',
+    'vehicle.truck': 'truck',
+    'vehicle.construction': 'construction_vehicle',
+    'vehicle.emergency.ambulance': 'ignore',
+    'vehicle.emergency.police': 'ignore',
+    'vehicle.trailer': 'trailer',
+    'movable_object.barrier': 'barrier',
+    'movable_object.trafficcone': 'traffic_cone',
+    'movable_object.pushable_pullable': 'ignore',
+    'movable_object.debris': 'ignore',
+    'static_object.bicycle_rack': 'ignore',
+}
+classes = [
+    'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
+    'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+]
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data-root', default='data/nuscenes')
@@ -106,18 +136,92 @@ def add_sweep_info(nusc, sample_infos):
 
     return sample_infos
 
+def get_gt(info):
+    """Generate gt labels from info.
+
+    Args:
+        info(dict): Infos needed to generate gt labels.
+
+    Returns:
+        Tensor: GT bboxes.
+        Tensor: GT labels.
+    """
+    ego2global_rotation = info['cams']['CAM_FRONT']['ego2global_rotation']
+    ego2global_translation = info['cams']['CAM_FRONT'][
+        'ego2global_translation']
+    trans = -np.array(ego2global_translation)
+    rot = Quaternion(ego2global_rotation).inverse
+    gt_boxes = list()
+    gt_labels = list()
+    for ann_info in info['ann_infos']:
+        # Use ego coordinate.
+        if (map_name_from_general_to_detection[ann_info['category_name']]
+                not in classes
+                or ann_info['num_lidar_pts'] + ann_info['num_radar_pts'] <= 0):
+            continue
+        box = Box(
+            ann_info['translation'],
+            ann_info['size'],
+            Quaternion(ann_info['rotation']),
+            velocity=ann_info['velocity'],
+        )
+        box.translate(trans)
+        box.rotate(rot)
+        box_xyz = np.array(box.center)
+        box_dxdydz = np.array(box.wlh)[[1, 0, 2]]
+        box_yaw = np.array([box.orientation.yaw_pitch_roll[0]])
+        box_velo = np.array(box.velocity[:2])
+        gt_box = np.concatenate([box_xyz, box_dxdydz, box_yaw, box_velo])
+        gt_boxes.append(gt_box)
+        gt_labels.append(
+            classes.index(
+                map_name_from_general_to_detection[ann_info['category_name']]))
+    return gt_boxes, gt_labels
+
+
+def add_ann_adj_info(nuscenes):
+    # nuscenes_version = 'v1.0-trainval'
+    # dataroot = './data/nuscenes/'
+    # nuscenes = NuScenes(nuscenes_version, dataroot)
+    for set in ['train', 'val']:
+        dataset = pickle.load(
+            open('./data/nuscenes/nuscenes_infos_%s_sweep.pkl' % (set), 'rb'))
+        for id in range(len(dataset['infos'])):
+            if id % 10 == 0:
+                print('%d/%d' % (id, len(dataset['infos'])))
+            info = dataset['infos'][id]
+            # get sweep adjacent frame info
+            sample = nuscenes.get('sample', info['token'])
+            ann_infos = list()
+            for ann in sample['anns']:
+                ann_info = nuscenes.get('sample_annotation', ann)
+                velocity = nuscenes.box_velocity(ann_info['token'])
+                if np.any(np.isnan(velocity)):
+                    velocity = np.zeros(3)
+                ann_info['velocity'] = velocity
+                ann_infos.append(ann_info)
+            dataset['infos'][id]['ann_infos'] = ann_infos
+            dataset['infos'][id]['ann_infos'] = get_gt(dataset['infos'][id])
+            dataset['infos'][id]['scene_token'] = sample['scene_token']
+
+            scene = nuscenes.get('scene', sample['scene_token'])
+            dataset['infos'][id]['occ_path'] = \
+                './data/nuscenes/gts/%s/%s'%(scene['name'], info['token'])
+        with open('./data/nuscenes/nuscenes_infos_%s_sweep.pkl' % (set), 'wb') as fid:
+            pickle.dump(dataset, fid)
 
 if __name__ == '__main__':
     nusc = NuScenes(args.version, args.data_root)
 
     if args.version == 'v1.0-trainval':
-        sample_infos = pickle.load(open(os.path.join('./data', 'nuscenes_infos_train.pkl'), 'rb'))
+        sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_train.pkl'), 'rb'))
         sample_infos = add_sweep_info(nusc, sample_infos)
         mmcv.dump(sample_infos, os.path.join(args.data_root, 'nuscenes_infos_train_sweep.pkl'))
 
-        sample_infos = pickle.load(open(os.path.join('./data', 'nuscenes_infos_val.pkl'), 'rb'))
+        sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_val.pkl'), 'rb'))
         sample_infos = add_sweep_info(nusc, sample_infos)
         mmcv.dump(sample_infos, os.path.join(args.data_root, 'nuscenes_infos_val_sweep.pkl'))
+        # add_ann_adj_info(nusc)
 
     elif args.version == 'v1.0-test':
         sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_test.pkl'), 'rb'))
