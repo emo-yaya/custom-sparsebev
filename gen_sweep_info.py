@@ -34,13 +34,27 @@ def get_cam_info(nusc, sample_data):
         'sensor2global_translation': sensor2global_translation,
         'cam_intrinsic': cam_intrinsic,
         'timestamp': sample_data['timestamp'],
+        'sensor2ego_translation_fbbev': sensor2ego_translation,
+        'sensor2ego_rotation_fbbev': Quaternion(cs_record['rotation']),
+        "ego2global_translation_fbbev": ego2global_translation,
+        "ego2global_rotation_fbbev": Quaternion(pose_record['rotation'])
     }
 
 
 def add_sweep_info(nusc, sample_infos):
+
+    token2info = {}
+    for info in sample_infos['infos']:
+        # info 里常见键名有 'token' 或 'sample_token'
+        token2info[info['token']] = info
+
+
     for curr_id in tqdm.tqdm(range(len(sample_infos['infos']))):
         sample = nusc.get('sample', sample_infos['infos'][curr_id]['token'])
 
+        scene = nusc.get('scene',  sample['scene_token'])
+        sample_infos['infos'][curr_id]['scene_name'] = scene['name']
+        
         cam_types = [
             'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_RIGHT',
             'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_FRONT_LEFT'
@@ -58,26 +72,37 @@ def add_sweep_info(nusc, sample_infos):
         # remove unnecessary
         for cam in cam_types:
             del sample_infos['infos'][curr_id]['cams'][cam]['sample_data_token']
-            del sample_infos['infos'][curr_id]['cams'][cam]['sensor2ego_translation']
-            del sample_infos['infos'][curr_id]['cams'][cam]['sensor2ego_rotation']
-            del sample_infos['infos'][curr_id]['cams'][cam]['ego2global_translation']
-            del sample_infos['infos'][curr_id]['cams'][cam]['ego2global_rotation']
+            # del sample_infos['infos'][curr_id]['cams'][cam]['sensor2ego_translation']
+            # del sample_infos['infos'][curr_id]['cams'][cam]['sensor2ego_rotation']
+            # del sample_infos['infos'][curr_id]['cams'][cam]['ego2global_translation']
+            # del sample_infos['infos'][curr_id]['cams'][cam]['ego2global_rotation']
 
         sweep_infos = []
+        sweep_infos_gt = []
+        sample_cur = sample
         if sample['prev'] != '':  # add sweep frame between two key frame
-            for _ in range(5):
+            for idx in range(5):
                 sweep_info = dict()
-                for cam in cam_types: 
-                    if curr_cams[cam]['prev'] == '':    
-                        sweep_info = sweep_infos[-1] 
+                for cam in cam_types:
+                    if curr_cams[cam]['prev'] == '':
+                        sweep_info = sweep_infos[-1]
                         break
                     sample_data = nusc.get('sample_data', curr_cams[cam]['prev'])
                     sweep_cam = get_cam_info(nusc, sample_data)
                     curr_cams[cam] = sample_data
                     sweep_info[cam] = sweep_cam
+                if sample_cur['prev'] == '':
+                    sweep_info_gt = sweep_infos_gt[-1]
+                else:
+                    sample_prev = nusc.get('sample', sample_cur['prev'])
+                    sweep_info_gt = token2info.get(sample_prev['token'])['gt_boxes']
+                    sample_cur = sample_prev
+                    
+                sweep_infos_gt.append(sweep_info_gt)
                 sweep_infos.append(sweep_info)
 
         sample_infos['infos'][curr_id]['sweeps'] = sweep_infos
+        sample_infos['infos'][curr_id]['sweeps_gts'] = sweep_infos_gt
 
     return sample_infos
 
@@ -100,11 +125,11 @@ if __name__ == '__main__':
         mmcv.dump(sample_infos, os.path.join(args.data_root, 'nuscenes_infos_test_sweep.pkl'))
 
     elif args.version == 'v1.0-mini':
-        sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_train_mini.pkl'), 'rb'))
+        sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_train.pkl'), 'rb'))
         sample_infos = add_sweep_info(nusc, sample_infos)
         mmcv.dump(sample_infos, os.path.join(args.data_root, 'nuscenes_infos_train_mini_sweep.pkl'))
 
-        sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_val_mini.pkl'), 'rb'))
+        sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_val.pkl'), 'rb'))
         sample_infos = add_sweep_info(nusc, sample_infos)
         mmcv.dump(sample_infos, os.path.join(args.data_root, 'nuscenes_infos_val_mini_sweep.pkl'))
 
