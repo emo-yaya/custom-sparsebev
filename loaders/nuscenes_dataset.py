@@ -365,43 +365,43 @@ class CustomNuScenesDataset(NuScenesDataset):
         return res 
 
 
-    def evaluate(self,
-                results,
-                metric='bbox',
-                logger=None,
-                jsonfile_prefix=None,
-                result_names=['pts_bbox'],
-                show=False,
-                out_dir=None,
-                pipeline=None):
-        import copy
-        info_list = []
-        results_copy = copy.deepcopy(results)
-        for result in results:
-            info = dict()
+    # def evaluate(self,
+    #             results,
+    #             metric='bbox',
+    #             logger=None,
+    #             jsonfile_prefix=None,
+    #             result_names=['pts_bbox'],
+    #             show=False,
+    #             out_dir=None,
+    #             pipeline=None):
+    #     import copy
+    #     info_list = []
+    #     results_copy = copy.deepcopy(results)
+    #     for result in results:
+    #         info = dict()
 
-            info['iou'] = result.pop('iou')
-            info['pred_occupancy'] = result.pop('pred_occupancy')
-            info['index'] = result.pop('index')
+    #         info['iou'] = result.pop('iou')
+    #         info['pred_occupancy'] = result.pop('pred_occupancy')
+    #         info['index'] = result.pop('index')
             
-            info_list.append(info)
+    #         info_list.append(info)
         
-        results_dict = dict()
+    #     results_dict = dict()
 
-        results_dict = super().evaluate(
-            results,
-            metric=metric,
-            logger=logger,
-            jsonfile_prefix=jsonfile_prefix,
-            result_names=['pts_bbox'],
-            show=show,
-            out_dir=out_dir,
-            pipeline=pipeline
-        )
-        results = info_list
+    #     results_dict = super().evaluate(
+    #         results,
+    #         metric=metric,
+    #         logger=logger,
+    #         jsonfile_prefix=jsonfile_prefix,
+    #         result_names=['pts_bbox'],
+    #         show=show,
+    #         out_dir=out_dir,
+    #         pipeline=pipeline
+    #     )
+    #     results = info_list
         
-        if results[0].get('pred_occupancy', None) is not None:
-            occupancy_result = self.evaluate_occupancy(results, show_dir=jsonfile_prefix, save=False)
-            results_dict.update(occupancy_result)
+    #     if results[0].get('pred_occupancy', None) is not None:
+    #         occupancy_result = self.evaluate_occupancy(results, show_dir=jsonfile_prefix, save=False)
+    #         results_dict.update(occupancy_result)
 
-        return results_dict
+    #     return results_dict
