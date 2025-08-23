@@ -79,6 +79,7 @@ def add_sweep_info(nusc, sample_infos):
 
         sweep_infos = []
         sweep_infos_gt = []
+        sweep_infos_gt_name = []
         sample_cur = sample
         if sample['prev'] != '':  # add sweep frame between two key frame
             for idx in range(5):
@@ -93,16 +94,20 @@ def add_sweep_info(nusc, sample_infos):
                     sweep_info[cam] = sweep_cam
                 if sample_cur['prev'] == '':
                     sweep_info_gt = sweep_infos_gt[-1]
+                    sweep_info_gt_name = sweep_infos_gt_name[-1]
                 else:
                     sample_prev = nusc.get('sample', sample_cur['prev'])
                     sweep_info_gt = token2info.get(sample_prev['token'])['gt_boxes']
+                    sweep_info_gt_name = token2info.get(sample_prev['token'])['gt_names']
                     sample_cur = sample_prev
                     
                 sweep_infos_gt.append(sweep_info_gt)
+                sweep_infos_gt_name.append(sweep_info_gt_name)
                 sweep_infos.append(sweep_info)
 
         sample_infos['infos'][curr_id]['sweeps'] = sweep_infos
         sample_infos['infos'][curr_id]['sweeps_gts'] = sweep_infos_gt
+        sample_infos['infos'][curr_id]['sweeps_gts_name'] = sweep_infos_gt_name
 
     return sample_infos
 

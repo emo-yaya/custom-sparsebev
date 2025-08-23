@@ -217,6 +217,7 @@ class LoadMultiViewImageFromMultiSweeps(object):
 
         results['adjacent'] = []
         results['adjacent_gts'] = []
+        results['adjacent_gts_name'] = []
         if len(results['sweeps']['prev']) == 0:
             for _ in range(self.sweeps_num):
                 sweep = {}
@@ -260,6 +261,7 @@ class LoadMultiViewImageFromMultiSweeps(object):
                     sweep = results['sweeps']['prev'][sweep_idx - 1]
                 results['adjacent'].append(sweep)
                 results['adjacent_gts'].append(results['sweeps_gts']['prev'][sweep_idx])
+                results['adjacent_gts_name'].append(results['sweeps_gts_name']['prev'][sweep_idx])
                 for sensor in cam_types:
                     results['img'].append(mmcv.imread(sweep[sensor]['data_path'], self.color_type))
                     sensor2keyego, sensor2sensor = get_sensor2ego_transformation(sweep[sensor], results, sensor, 'CAM_FRONT', index=0)

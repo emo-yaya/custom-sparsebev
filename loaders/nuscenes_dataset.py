@@ -148,33 +148,41 @@ class CustomNuScenesDataset(NuScenesDataset):
     def collect_sweeps(self, index, into_past=60, into_future=60):
         all_sweeps_prev = []
         all_sweeps_prev_gts = []
+        all_sweeps_prev_gts_name = []
         curr_index = index
         while len(all_sweeps_prev) < into_past:
             curr_sweeps = self.data_infos[curr_index]['sweeps']
             curr_sweeps_gts = self.data_infos[curr_index]['sweeps_gts']
+            curr_sweeps_gts_name = self.data_infos[curr_index]['sweeps_gts_name']
             if len(curr_sweeps) == 0:
                 break
             all_sweeps_prev.extend(curr_sweeps)
             all_sweeps_prev.append(self.data_infos[curr_index - 1]['cams'])
             all_sweeps_prev_gts.extend(curr_sweeps_gts)
             all_sweeps_prev_gts.append(self.data_infos[curr_index - 1]['gt_boxes'])
+            all_sweeps_prev_gts_name.extend(curr_sweeps_gts_name)
+            all_sweeps_prev_gts_name.append(self.data_infos[curr_index - 1]['gt_names'])
             curr_index = curr_index - 1
         
         all_sweeps_next = []
         all_sweeps_next_gts = []
+        all_sweeps_next_gts_name = []
         curr_index = index + 1
         while len(all_sweeps_next) < into_future:
             if curr_index >= len(self.data_infos):
                 break
             curr_sweeps = self.data_infos[curr_index]['sweeps']
             curr_sweeps_gts = self.data_infos[curr_index]['sweeps_gts']
+            curr_sweeps_gts_name = self.data_infos[curr_index]['sweeps_gts_name']
             all_sweeps_next.extend(curr_sweeps[::-1])
             all_sweeps_next.append(self.data_infos[curr_index]['cams'])
             all_sweeps_next_gts.extend(curr_sweeps_gts[::-1])
             all_sweeps_next_gts.append(self.data_infos[curr_index]['gt_boxes'])
+            all_sweeps_next_gts_name.extend(curr_sweeps_gts_name[::-1])
+            all_sweeps_next_gts_name.append(self.data_infos[curr_index]['gt_names'])
             curr_index = curr_index + 1
 
-        return all_sweeps_prev, all_sweeps_next, all_sweeps_prev_gts, all_sweeps_next_gts
+        return all_sweeps_prev, all_sweeps_next, all_sweeps_prev_gts, all_sweeps_next_gts, all_sweeps_prev_gts_name, all_sweeps_next_gts_name
     
     def _set_sequence_group_flag(self):
         """
@@ -184,7 +192,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         res = []
         curr_sequence = 0
         for idx in range(len(self.data_infos)):
-            sweeps_prev, sweeps_next, sweeps_prev_gts, sweeps_next_gts = self.collect_sweeps(idx)
+            sweeps_prev, sweeps_next, _, _, _, _ = self.collect_sweeps(idx)
 
             if idx != 0 and len(sweeps_prev) == 0:
                 # Not first frame and # of sweeps is 0 -> new sequence
@@ -217,7 +225,7 @@ class CustomNuScenesDataset(NuScenesDataset):
 
     def get_data_info(self, index):
         info = self.data_infos[index]
-        sweeps_prev, sweeps_next, sweeps_prev_gts, sweeps_next_gts = self.collect_sweeps(index)
+        sweeps_prev, sweeps_next, sweeps_prev_gts, sweeps_next_gts, sweeps_prev_gts_name, sweeps_next_gts_name = self.collect_sweeps(index)
 
         ego2global_translation = info['ego2global_translation']
         ego2global_rotation = info['ego2global_rotation']
@@ -238,7 +246,8 @@ class CustomNuScenesDataset(NuScenesDataset):
             ego2global_rotation=ego2global_rotation,
             lidar2ego_translation=lidar2ego_translation,
             lidar2ego_rotation=lidar2ego_rotation,
-            sweeps_gts={'prev': sweeps_prev_gts, 'next': sweeps_next_gts}
+            sweeps_gts={'prev': sweeps_prev_gts, 'next': sweeps_next_gts},
+            sweeps_gts_name={'prev': sweeps_prev_gts_name, 'next': sweeps_next_gts_name}
         )
 
         if self.modality['use_camera']:
