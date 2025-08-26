@@ -8,9 +8,8 @@ from mmcv.cnn.bricks.transformer import MultiheadAttention, FFN
 from mmdet.models.utils.builder import TRANSFORMER
 from .bbox.utils import decode_bbox
 from .utils import inverse_sigmoid, DUMP
-from .sparsebev_sampling import sampling_4d, make_sample_points
+from .sparsebev_sampling import sampling_4d, make_sample_points_from_bbox
 from .checkpoint import checkpoint as cp
-from .csrc.wrapper import MSMV_CUDA
 
 
 @TRANSFORMER.register_module()
@@ -44,7 +43,6 @@ class SparseBEVTransformerDecoder(BaseModule):
         self.num_layers = num_layers
         self.pc_range = pc_range
 
-        # params are shared across all decoder layers
         self.decoder_layer = SparseBEVTransformerDecoderLayer(
             embed_dims, num_frames, num_points, num_levels, num_classes, code_size, pc_range=pc_range
         )
@@ -56,7 +54,6 @@ class SparseBEVTransformerDecoder(BaseModule):
     def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
         cls_scores, bbox_preds = [], []
 
-        # calculate time difference according to timestamps
         timestamps = np.array([m['img_timestamp'] for m in img_metas], dtype=np.float64)
         timestamps = np.reshape(timestamps, [query_bbox.shape[0], -1, 6])
         time_diff = timestamps[:, :1, :] - timestamps
@@ -64,24 +61,16 @@ class SparseBEVTransformerDecoder(BaseModule):
         time_diff = torch.from_numpy(time_diff).to(query_bbox.device)  # [B, F]
         img_metas[0]['time_diff'] = time_diff
 
-        # organize projections matrix and copy to CUDA
         lidar2img = np.asarray([m['lidar2img'] for m in img_metas]).astype(np.float32)
         lidar2img = torch.from_numpy(lidar2img).to(query_bbox.device)  # [B, N, 4, 4]
         img_metas[0]['lidar2img'] = lidar2img
 
-        # group image features in advance for sampling, see `sampling_4d` for more details
         for lvl, feat in enumerate(mlvl_feats):
             B, TN, GC, H, W = feat.shape  # [B, TN, GC, H, W]
             N, T, G, C = 6, TN // 6, 4, GC // 4
             feat = feat.reshape(B, T, N, G, C, H, W)
-
-            if MSMV_CUDA:  # Our CUDA operator requires channel_last
-                feat = feat.permute(0, 1, 3, 2, 5, 6, 4)  # [B, T, G, N, H, W, C]
-                feat = feat.reshape(B*T*G, N, H, W, C)
-            else:  # Torch's grid_sample requires channel_first
-                feat = feat.permute(0, 1, 3, 4, 2, 5, 6)  # [B, T, G, C, N, H, W]
-                feat = feat.reshape(B*T*G, C, N, H, W)
-
+            feat = feat.permute(0, 1, 3, 2, 5, 6, 4)  # [B, T, G, N, H, W, C]
+            feat = feat.reshape(B*T*G, N, H, W, C)  # [BTG, C, N, H, W]
             mlvl_feats[lvl] = feat.contiguous()
 
         for i in range(self.num_layers):
@@ -175,7 +164,6 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
         bbox_pred = self.reg_branch(query_feat)  # [B, Q, code_size]
         bbox_pred = self.refine_bbox(query_bbox, bbox_pred)
 
-        # calculate absolute velocity according to time difference
         time_diff = img_metas[0]['time_diff']  # [B, F]
         if time_diff.shape[1] > 1:
             time_diff = time_diff.clone()
@@ -186,48 +174,54 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
             query_bbox_dec = decode_bbox(query_bbox, self.pc_range)
             bbox_pred_dec = decode_bbox(bbox_pred, self.pc_range)
             cls_score_sig = torch.sigmoid(cls_score)
-            torch.save(query_bbox_dec.cpu(), '{}/query_bbox_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
-            torch.save(bbox_pred_dec.cpu(), '{}/bbox_pred_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
-            torch.save(cls_score_sig.cpu(), '{}/cls_score_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
+            torch.save(query_bbox_dec, '{}/query_bbox_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
+            torch.save(bbox_pred_dec, '{}/bbox_pred_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
+            torch.save(cls_score_sig, '{}/cls_score_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
 
         return query_feat, cls_score, bbox_pred
 
 
 class SparseBEVSelfAttention(BaseModule):
-    """Scale-adaptive Self Attention"""
-    def __init__(self, embed_dims=256, num_heads=8, dropout=0.1, pc_range=[], init_cfg=None):
-        super().__init__(init_cfg)
+    def __init__(self, embed_dims=256, num_heads=8, dropout=0.1, pc_range=[], scale_adaptive=True):
+        super().__init__()
         self.pc_range = pc_range
 
         self.attention = MultiheadAttention(embed_dims, num_heads, dropout, batch_first=True)
-        self.gen_tau = nn.Linear(embed_dims, num_heads)
+
+        if scale_adaptive:
+            self.gen_tau = nn.Linear(embed_dims, num_heads)
+        else:
+            self.gen_tau = None
 
     @torch.no_grad()
     def init_weights(self):
-        nn.init.zeros_(self.gen_tau.weight)
-        nn.init.uniform_(self.gen_tau.bias, 0.0, 2.0)
+        if self.gen_tau is not None:
+            nn.init.zeros_(self.gen_tau.weight)
+            nn.init.uniform_(self.gen_tau.bias, 0.0, 2.0)
 
-    def inner_forward(self, query_bbox, query_feat, pre_attn_mask):
+    def inner_forward(self, query_bbox, query_feat, pre_attn_mask=None):
         """
         query_bbox: [B, Q, 10]
         query_feat: [B, Q, C]
         """
-        dist = self.calc_bbox_dists(query_bbox)
-        tau = self.gen_tau(query_feat)  # [B, Q, 8]
+        if self.gen_tau is not None:
+            dist = self.calc_bbox_dists(query_bbox)
+            tau = self.gen_tau(query_feat)  # [B, Q, 8]
 
-        if DUMP.enabled:
-            torch.save(tau.cpu(), '{}/sasa_tau_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
+            if DUMP.enabled:
+                torch.save(tau, '{}/sasa_tau_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
 
-        tau = tau.permute(0, 2, 1)  # [B, 8, Q]
-        attn_mask = dist[:, None, :, :] * tau[..., None]  # [B, 8, Q, Q]
-
-        if pre_attn_mask is not None:  # for query denoising
-            attn_mask[:, :, pre_attn_mask] = float('-inf')
-
-        attn_mask = attn_mask.flatten(0, 1)  # [Bx8, Q, Q]
+            tau = tau.permute(0, 2, 1)  # [B, 8, Q]
+            attn_mask = dist[:, None, :, :] * tau[..., None]  # [B, 8, Q, Q]
+            if pre_attn_mask is not None:
+                attn_mask[:, :, pre_attn_mask] = float('-inf')
+            attn_mask = attn_mask.flatten(0, 1)  # [Bx8, Q, Q]
+        else:
+            attn_mask = None
+        
         return self.attention(query_feat, attn_mask=attn_mask)
 
-    def forward(self, query_bbox, query_feat, pre_attn_mask):
+    def forward(self, query_bbox, query_feat, pre_attn_mask=None):
         if self.training and query_feat.requires_grad:
             return cp(self.inner_forward, query_bbox, query_feat, pre_attn_mask, use_reentrant=False)
         else:
@@ -249,7 +243,6 @@ class SparseBEVSelfAttention(BaseModule):
 
 
 class SparseBEVSampling(BaseModule):
-    """Adaptive Spatio-temporal Sampling"""
     def __init__(self, embed_dims=256, num_frames=4, num_groups=4, num_points=8, num_levels=4, pc_range=[], init_cfg=None):
         super().__init__(init_cfg)
 
@@ -278,21 +271,22 @@ class SparseBEVSampling(BaseModule):
         # sampling offset of all frames
         sampling_offset = self.sampling_offset(query_feat)
         sampling_offset = sampling_offset.view(B, Q, self.num_groups * self.num_points, 3)
-        sampling_points = make_sample_points(query_bbox, sampling_offset, self.pc_range)  # [B, Q, GP, 3]
+        sampling_points = make_sample_points_from_bbox(query_bbox, sampling_offset, self.pc_range)  # [B, Q, GP, 3]
         sampling_points = sampling_points.reshape(B, Q, 1, self.num_groups, self.num_points, 3)
         sampling_points = sampling_points.expand(B, Q, self.num_frames, self.num_groups, self.num_points, 3)
 
         # warp sample points based on velocity
-        time_diff = img_metas[0]['time_diff']  # [B, F]
-        time_diff = time_diff[:, None, :, None]  # [B, 1, F, 1]
-        vel = query_bbox[..., 8:].detach()  # [B, Q, 2]
-        vel = vel[:, :, None, :]  # [B, Q, 1, 2]
-        dist = vel * time_diff  # [B, Q, F, 2]
-        dist = dist[:, :, :, None, None, :]  # [B, Q, F, 1, 1, 2]
-        sampling_points = torch.cat([
-            sampling_points[..., 0:2] - dist,
-            sampling_points[..., 2:3]
-        ], dim=-1)
+        if query_bbox.shape[-1] > 8:
+            time_diff = img_metas[0]['time_diff']  # [B, F]
+            time_diff = time_diff[:, None, :, None]  # [B, 1, F, 1]
+            vel = query_bbox[..., 8:].detach()  # [B, Q, 2]
+            vel = vel[:, :, None, :]  # [B, Q, 1, 2]
+            dist = vel * time_diff  # [B, Q, F, 2]
+            dist = dist[:, :, :, None, None, :]  # [B, Q, F, 1, 1, 2]
+            sampling_points = torch.cat([
+                sampling_points[..., 0:2] - dist,
+                sampling_points[..., 2:3]
+            ], dim=-1)
 
         # scale weights
         scale_weights = self.scale_weights(query_feat).view(B, Q, self.num_groups, 1, self.num_points, self.num_levels)
@@ -318,7 +312,6 @@ class SparseBEVSampling(BaseModule):
 
 
 class AdaptiveMixing(nn.Module):
-    """Adaptive Mixing"""
     def __init__(self, in_dim, in_points, n_groups=1, query_dim=None, out_dim=None, out_points=None):
         super(AdaptiveMixing, self).__init__()
 
@@ -374,6 +367,118 @@ class AdaptiveMixing(nn.Module):
         out = self.act(out)
 
         '''linear transfomation to query dim'''
+        out = out.reshape(B, Q, -1)
+        out = self.out_proj(out)
+        out = query + out
+
+        return out
+
+    def forward(self, x, query):
+        if self.training and x.requires_grad:
+            return cp(self.inner_forward, x, query, use_reentrant=False)
+        else:
+            return self.inner_forward(x, query)
+
+
+class AdaptiveMixingPointOnly(nn.Module):
+    def __init__(self, in_dim, in_points, n_groups=1, query_dim=None, out_dim=None, out_points=None):
+        super(AdaptiveMixingPointOnly, self).__init__()
+
+        out_dim = out_dim if out_dim is not None else in_dim
+        out_points = out_points if out_points is not None else in_points
+        query_dim = query_dim if query_dim is not None else in_dim
+
+        self.query_dim = query_dim
+        self.in_dim = in_dim
+        self.in_points = in_points
+        self.n_groups = n_groups
+        self.out_dim = out_dim
+        self.out_points = out_points
+
+        self.eff_in_dim = in_dim // n_groups
+        self.eff_out_dim = out_dim // n_groups
+
+        self.s_parameters = self.in_points * self.out_points
+        self.total_parameters = self.s_parameters
+
+        self.parameter_generator = nn.Linear(self.query_dim, self.n_groups * self.total_parameters)
+        self.out_proj = nn.Linear(self.eff_out_dim * self.out_points * self.n_groups, self.query_dim)
+        self.act = nn.ReLU(inplace=True)
+
+    @torch.no_grad()
+    def init_weights(self):
+        nn.init.zeros_(self.parameter_generator.weight)
+
+    def inner_forward(self, x, query):
+        B, Q, G, P, C = x.shape
+        assert G == self.n_groups
+        assert P == self.in_points
+        assert C == self.eff_in_dim
+
+        '''generate mixing parameters'''
+        params = self.parameter_generator(query)
+        params = params.reshape(B*Q, G, -1)
+        out = x.reshape(B*Q, G, P, C)
+
+        S = params.reshape(B*Q, G, self.out_points, self.in_points)
+
+        '''adaptive spatial mixing'''
+        out = torch.matmul(S, out)  # implicitly transpose and matmul
+        out = F.layer_norm(out, [out.size(-2), out.size(-1)])
+        out = self.act(out)
+
+        '''linear transfomation to query dim'''
+        out = out.reshape(B, Q, -1)
+        out = self.out_proj(out)
+        out = query + out
+
+        return out
+
+    def forward(self, x, query):
+        if self.training and x.requires_grad:
+            return cp(self.inner_forward, x, query, use_reentrant=False)
+        else:
+            return self.inner_forward(x, query)
+
+
+class DeformAggregation(nn.Module):
+    def __init__(self, in_dim, in_points, n_groups=1, query_dim=None, out_dim=None, out_points=None):
+        super(DeformAggregation, self).__init__()
+
+        out_dim = out_dim if out_dim is not None else in_dim
+        out_points = out_points if out_points is not None else in_points
+        query_dim = query_dim if query_dim is not None else in_dim
+
+        self.query_dim = query_dim
+        self.in_dim = in_dim
+        self.in_points = in_points
+        self.n_groups = n_groups
+        self.out_dim = out_dim
+        self.out_points = out_points
+
+        self.eff_in_dim = in_dim // n_groups
+        self.eff_out_dim = out_dim // n_groups
+
+        self.attn_weights = nn.Linear(query_dim, n_groups * in_points)
+        self.out_proj = nn.Linear(self.eff_in_dim * n_groups, self.query_dim)
+        self.act = nn.ReLU(inplace=True)
+
+    @torch.no_grad()
+    def init_weights(self):
+        pass
+
+    def inner_forward(self, x, query):
+        B, Q, G, P, C = x.shape
+        assert G == self.n_groups
+        assert P == self.in_points
+        assert C == self.eff_in_dim
+        out = x.reshape(B, Q, G, P, C)
+
+        attn_weights = self.attn_weights(query)  # [B, Q, GP]
+        attn_weights = attn_weights.reshape(B, Q, self.n_groups, self.in_points, 1)  # [B, Q, G, P, 1]
+        attn_weights = attn_weights.softmax(dim=-2)
+
+        out = torch.sum(out * attn_weights, dim=-2)  # [B, Q, G, C]
         out = out.reshape(B, Q, -1)
         out = self.out_proj(out)
         out = query + out

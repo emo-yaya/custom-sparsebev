@@ -75,3 +75,45 @@ def decode_bbox(bboxes, pc_range=None):
         return torch.cat([xyz, wlh, rot, vel], dim=-1)
     else:
         return torch.cat([xyz, wlh, rot], dim=-1)
+
+def bbox2occrange(bboxes, occ_size, query_cube_size=None):
+    """
+    xyz in [0, 1]
+    wlh in [0, 1]
+    """
+    xyz = bboxes[..., 0:3].clone()
+    if query_cube_size is not None:
+        wlh = torch.zeros_like(xyz)
+        wlh[..., 0] = query_cube_size[0]
+        wlh[..., 1] = query_cube_size[1]
+        wlh[..., 2] = query_cube_size[2]
+    else:
+        wlh = bboxes[..., 3:6]
+        wlh[..., 0] = wlh[..., 0] * occ_size[0]
+        wlh[..., 1] = wlh[..., 1] * occ_size[1]
+        wlh[..., 2] = wlh[..., 2] * occ_size[2]
+    
+    xyz[..., 0] = xyz[..., 0] * occ_size[0]
+    xyz[..., 1] = xyz[..., 1] * occ_size[1]
+    xyz[..., 2] = xyz[..., 2] * occ_size[2]
+    
+    xyz = torch.round(xyz)
+        
+    low_bound = torch.round(xyz - wlh/2)
+    high_bound = torch.round(xyz + wlh/2)
+    
+    return torch.cat((low_bound, high_bound), dim=-1).long()
+
+def occrange2bbox(occ_range, occ_size, pc_range):
+    """
+    Return: xyz in [0, 1], wlh in [0, pc_range_size)
+    """
+    xyz = (occ_range[..., :3] + occ_range[..., 3:]).to(torch.float32) / 2
+    xyz[..., 0] /= occ_size[0]
+    xyz[..., 1] /= occ_size[1]
+    xyz[..., 2] /= occ_size[2]
+    wlh = (occ_range[..., 3:] - occ_range[..., :3]).to(torch.float32)
+    wlh[..., 0] *= (pc_range[3] - pc_range[0]) / occ_size[0]
+    wlh[..., 1] *= (pc_range[4] - pc_range[1]) / occ_size[1]
+    wlh[..., 2] *= (pc_range[5] - pc_range[2]) / occ_size[2]
+    return torch.cat((xyz, wlh), dim=-1)

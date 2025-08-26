@@ -1,9 +1,13 @@
 import os
 import mmcv
+import torch
 import numpy as np
 from mmdet.datasets.builder import PIPELINES
 from numpy.linalg import inv
 from mmcv.runner import get_dist_info
+from mmcv.parallel import DataContainer as DC
+from mmdet.datasets.pipelines import to_tensor
+from torchvision.transforms.functional import rotate
 
 
 def compose_lidar2img(ego2global_translation_curr,
@@ -63,6 +67,8 @@ class LoadMultiViewImageFromMultiSweeps(object):
                     results['img_timestamp'].append(results['img_timestamp'][j])
                     results['filename'].append(results['filename'][j])
                     results['lidar2img'].append(np.copy(results['lidar2img'][j]))
+                    if 'ego2lidar' in results:
+                        results['ego2lidar'].append(results['ego2lidar'][0])
         else:
             if self.test_mode:
                 interval = self.test_interval
@@ -97,13 +103,15 @@ class LoadMultiViewImageFromMultiSweeps(object):
                         sweep[sensor]['sensor2global_rotation'],
                         sweep[sensor]['cam_intrinsic'],
                     ))
+                    if 'ego2lidar' in results:
+                        results['ego2lidar'].append(results['ego2lidar'][0])
 
         return results
 
     def load_online(self, results):
         # only used when measuring FPS
         assert self.test_mode
-        assert self.test_interval == 6
+        assert self.test_interval % 6 == 0
 
         cam_types = [
             'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT',
@@ -116,6 +124,8 @@ class LoadMultiViewImageFromMultiSweeps(object):
                     results['img_timestamp'].append(results['img_timestamp'][j])
                     results['filename'].append(results['filename'][j])
                     results['lidar2img'].append(np.copy(results['lidar2img'][j]))
+                    if 'ego2lidar' in results:
+                        results['ego2lidar'].append(results['ego2lidar'][0])
         else:
             interval = self.test_interval
             choices = [(k + 1) * interval - 1 for k in range(self.sweeps_num)]
@@ -140,6 +150,8 @@ class LoadMultiViewImageFromMultiSweeps(object):
                         sweep[sensor]['sensor2global_rotation'],
                         sweep[sensor]['cam_intrinsic'],
                     ))
+                    if 'ego2lidar' in results:
+                        results['ego2lidar'].append(results['ego2lidar'][0])
 
         return results
 
@@ -155,238 +167,143 @@ class LoadMultiViewImageFromMultiSweeps(object):
 
 
 @PIPELINES.register_module()
-class LoadMultiViewImageFromMultiSweepsFuture(object):
-    def __init__(self,
-                 prev_sweeps_num=5,
-                 next_sweeps_num=5,
-                 color_type='color',
-                 test_mode=False):
-        self.prev_sweeps_num = prev_sweeps_num
-        self.next_sweeps_num = next_sweeps_num
-        self.color_type = color_type
-        self.test_mode = test_mode
-
-        assert prev_sweeps_num == next_sweeps_num
-
-        self.train_interval = [4, 8]
-        self.test_interval = 6
-
-        try:
-            mmcv.use_backend('turbojpeg')
-        except ImportError:
-            mmcv.use_backend('cv2')
-
+class LoadOccGTFromFile(object):
+    def __init__(self, num_classes=18, inst_class_ids=[]):
+        self.num_classes = num_classes
+        self.inst_class_ids = inst_class_ids
+    
     def __call__(self, results):
-        if self.prev_sweeps_num == 0 and self.next_sweeps_num == 0:
-            return results
+        occ_labels = np.load(results['occ_path'])
+        semantics = occ_labels['semantics']  # [200, 200, 16]
+        # mask_lidar = occ_labels['mask_lidar'].astype(np.bool_)  # [200, 200, 16]
+        # mask_camera = occ_labels['mask_camera'].astype(np.bool_)  # [200, 200, 16]
 
-        cam_types = [
-            'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT',
-            'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_BACK_RIGHT'
-        ]
-
-        if self.test_mode:
-            interval = self.test_interval
+        # results['mask_lidar'] = mask_lidar
+        # results['mask_camera'] = mask_camera
+  
+        # instance GT
+        if 'instances' in occ_labels.keys():
+            instances = occ_labels['instances']
+            instance_class_ids = [self.num_classes - 1]  # the 0-th class is always free class
+            for i in range(1, instances.max() + 1):
+                class_id = np.unique(semantics[instances == i])
+                assert class_id.shape[0] == 1, "each instance must belong to only one class"
+                instance_class_ids.append(class_id[0])
+            instance_class_ids = np.array(instance_class_ids)
         else:
-            interval = np.random.randint(self.train_interval[0], self.train_interval[1] + 1)
+            instances = None
+            instance_class_ids = None
 
-        # previous sweeps
-        if len(results['sweeps']['prev']) == 0:
-            for _ in range(self.prev_sweeps_num):
-                for j in range(len(cam_types)):
-                    results['img'].append(results['img'][j])
-                    results['img_timestamp'].append(results['img_timestamp'][j])
-                    results['filename'].append(results['filename'][j])
-                    results['lidar2img'].append(np.copy(results['lidar2img'][j]))
-        else:
-            choices = [(k + 1) * interval - 1 for k in range(self.prev_sweeps_num)]
+        instance_count = 0
+        final_instance_class_ids = []
+        final_instances = np.ones_like(semantics) * 255  # empty space has instance id "255"
 
-            for idx in sorted(list(choices)):
-                sweep_idx = min(idx, len(results['sweeps']['prev']) - 1)
-                sweep = results['sweeps']['prev'][sweep_idx]
+        for class_id in range(self.num_classes - 1):
+            if np.sum(semantics == class_id) == 0:
+                continue
 
-                if len(sweep.keys()) < len(cam_types):
-                    sweep = results['sweeps']['prev'][sweep_idx - 1]
+            if class_id in self.inst_class_ids:
+                assert instances is not None, 'instance annotation not found'
+                # treat as instances
+                for instance_id in range(len(instance_class_ids)):
+                    if instance_class_ids[instance_id] != class_id:
+                        continue
+                    final_instances[instances == instance_id] = instance_count
+                    instance_count += 1
+                    final_instance_class_ids.append(class_id)
+            else:
+                # treat as semantics
+                final_instances[semantics == class_id] = instance_count
+                instance_count += 1
+                final_instance_class_ids.append(class_id)
 
-                for sensor in cam_types:
-                    results['img'].append(mmcv.imread(sweep[sensor]['data_path'], self.color_type))
-                    results['img_timestamp'].append(sweep[sensor]['timestamp'] / 1e6)
-                    results['filename'].append(sweep[sensor]['data_path'])
-                    results['lidar2img'].append(compose_lidar2img(
-                        results['ego2global_translation'],
-                        results['ego2global_rotation'],
-                        results['lidar2ego_translation'],
-                        results['lidar2ego_rotation'],
-                        sweep[sensor]['sensor2global_translation'],
-                        sweep[sensor]['sensor2global_rotation'],
-                        sweep[sensor]['cam_intrinsic'],
-                    ))
+        results['voxel_semantics'] = semantics
+        results['voxel_instances'] = final_instances
+        results['instance_class_ids'] = DC(to_tensor(final_instance_class_ids))
 
-        # future sweeps
-        if len(results['sweeps']['next']) == 0:
-            for _ in range(self.next_sweeps_num):
-                for j in range(len(cam_types)):
-                    results['img'].append(results['img'][j])
-                    results['img_timestamp'].append(results['img_timestamp'][j])
-                    results['filename'].append(results['filename'][j])
-                    results['lidar2img'].append(np.copy(results['lidar2img'][j]))
-        else:
-            choices = [(k + 1) * interval - 1 for k in range(self.next_sweeps_num)]
+        if results.get('rotate_bda', False):
+            semantics = torch.from_numpy(semantics).permute(2, 0, 1)  # [16, 200, 200]
+            semantics = rotate(semantics, results['rotate_bda'], fill=255).permute(1, 2, 0)  # [200, 200, 16]
+            results['voxel_semantics'] = semantics.numpy()
 
-            for idx in sorted(list(choices)):
-                sweep_idx = min(idx, len(results['sweeps']['next']) - 1)
-                sweep = results['sweeps']['next'][sweep_idx]
+            final_instances = torch.from_numpy(final_instances).permute(2, 0, 1)  # [16, 200, 200]
+            final_instances = rotate(final_instances, results['rotate_bda'], fill=255).permute(1, 2, 0)  # [200, 200, 16]
+            results['voxel_instances'] = final_instances.numpy()
 
-                if len(sweep.keys()) < len(cam_types):
-                    sweep = results['sweeps']['next'][sweep_idx - 1]
-
-                for sensor in cam_types:
-                    results['img'].append(mmcv.imread(sweep[sensor]['data_path'], self.color_type))
-                    results['img_timestamp'].append(sweep[sensor]['timestamp'] / 1e6)
-                    results['filename'].append(sweep[sensor]['data_path'])
-                    results['lidar2img'].append(compose_lidar2img(
-                        results['ego2global_translation'],
-                        results['ego2global_rotation'],
-                        results['lidar2ego_translation'],
-                        results['lidar2ego_rotation'],
-                        sweep[sensor]['sensor2global_translation'],
-                        sweep[sensor]['sensor2global_rotation'],
-                        sweep[sensor]['cam_intrinsic'],
-                    ))
+        if results.get('flip_dx', False):
+            results['voxel_semantics'] = results['voxel_semantics'][::-1, ...].copy()
+            results['voxel_instances'] = results['voxel_instances'][::-1, ...].copy()
+            
+        if results.get('flip_dy', False):
+            results['voxel_semantics'] = results['voxel_semantics'][:, ::-1, ...].copy()
+            results['voxel_instances'] = results['voxel_instances'][:, ::-1, ...].copy()
 
         return results
 
 
-'''
-This func loads previous and future frames in interleaved order, 
-e.g. curr, prev1, next1, prev2, next2, prev3, next3...
-'''
+# https://github.com/HuangJunJie2017/BEVDet/blob/58c2587a8f89a1927926f0bdb6cde2917c91a9a5/mmdet3d/datasets/pipelines/loading.py#L1177
 @PIPELINES.register_module()
-class LoadMultiViewImageFromMultiSweepsFutureInterleave(object):
-    def __init__(self,
-                 prev_sweeps_num=5,
-                 next_sweeps_num=5,
-                 color_type='color',
-                 test_mode=False):
-        self.prev_sweeps_num = prev_sweeps_num
-        self.next_sweeps_num = next_sweeps_num
-        self.color_type = color_type
-        self.test_mode = test_mode
+class BEVAug(object):
+    def __init__(self, bda_aug_conf, classes, is_train=True):
+        self.bda_aug_conf = bda_aug_conf
+        self.is_train = is_train
+        self.classes = classes
 
-        assert prev_sweeps_num == next_sweeps_num
+    def sample_bda_augmentation(self):
+        """Generate bda augmentation values based on bda_config."""
+        if self.is_train:
+            rotate_bda = np.random.uniform(*self.bda_aug_conf['rot_lim'])
+            scale_bda = np.random.uniform(*self.bda_aug_conf['scale_lim'])
+            flip_dx = np.random.uniform() < self.bda_aug_conf['flip_dx_ratio']
+            flip_dy = np.random.uniform() < self.bda_aug_conf['flip_dy_ratio']
+        else:
+            rotate_bda = 0
+            scale_bda = 1.0
+            flip_dx = False
+            flip_dy = False
+        return rotate_bda, scale_bda, flip_dx, flip_dy
 
-        self.train_interval = [4, 8]
-        self.test_interval = 6
+    def bev_transform(self, rotate_angle, scale_ratio, flip_dx, flip_dy):
+        """
+        Returns:
+            rot_mat: (3, 3)
+        """
+        rotate_angle = torch.tensor(rotate_angle / 180 * np.pi)
+        rot_sin = torch.sin(rotate_angle)
+        rot_cos = torch.cos(rotate_angle)
+        rot_mat = torch.Tensor([[rot_cos, -rot_sin, 0], [rot_sin, rot_cos, 0],
+                                [0, 0, 1]])
+        scale_mat = torch.Tensor([[scale_ratio, 0, 0], [0, scale_ratio, 0],
+                                  [0, 0, scale_ratio]])
+        flip_mat = torch.Tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
 
-        try:
-            mmcv.use_backend('turbojpeg')
-        except ImportError:
-            mmcv.use_backend('cv2')
+        if flip_dx:
+            flip_mat = flip_mat @ torch.Tensor([[-1, 0, 0], [0, 1, 0],
+                                                [0, 0, 1]])
+        if flip_dy:
+            flip_mat = flip_mat @ torch.Tensor([[1, 0, 0], [0, -1, 0],
+                                                [0, 0, 1]])
+        rot_mat = flip_mat @ (scale_mat @ rot_mat)
+        
+        return rot_mat
 
     def __call__(self, results):
-        if self.prev_sweeps_num == 0 and self.next_sweeps_num == 0:
-            return results
+        rotate_bda, scale_bda, flip_dx, flip_dy = self.sample_bda_augmentation()
 
-        cam_types = [
-            'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT',
-            'CAM_BACK', 'CAM_BACK_LEFT', 'CAM_BACK_RIGHT'
-        ]
+        bda_mat = torch.zeros(4, 4)
+        bda_mat[3, 3] = 1
 
-        if self.test_mode:
-            interval = self.test_interval
-        else:
-            interval = np.random.randint(self.train_interval[0], self.train_interval[1] + 1)
+        # bda_rot: (3, 3)
+        bda_rot = self.bev_transform(rotate_bda, scale_bda, flip_dx, flip_dy)
+        bda_mat[:3, :3] = bda_rot
 
-        results_prev = dict(
-            img=[],
-            img_timestamp=[],
-            filename=[],
-            lidar2img=[]
-        )
-        results_next = dict(
-            img=[],
-            img_timestamp=[],
-            filename=[],
-            lidar2img=[]
-        )
+        results['bda_mat'] = bda_mat
+        results['flip_dx'] = flip_dx
+        results['flip_dy'] = flip_dy
+        results['rotate_bda'] = rotate_bda
+        results['scale_bda'] = scale_bda
 
-        if len(results['sweeps']['prev']) == 0:
-            for _ in range(self.prev_sweeps_num):
-                for j in range(len(cam_types)):
-                    results_prev['img'].append(results['img'][j])
-                    results_prev['img_timestamp'].append(results['img_timestamp'][j])
-                    results_prev['filename'].append(results['filename'][j])
-                    results_prev['lidar2img'].append(np.copy(results['lidar2img'][j]))
-        else:
-            choices = [(k + 1) * interval - 1 for k in range(self.prev_sweeps_num)]
-
-            for idx in sorted(list(choices)):
-                sweep_idx = min(idx, len(results['sweeps']['prev']) - 1)
-                sweep = results['sweeps']['prev'][sweep_idx]
-
-                if len(sweep.keys()) < len(cam_types):
-                    sweep = results['sweeps']['prev'][sweep_idx - 1]
-
-                for sensor in cam_types:
-                    results_prev['img'].append(mmcv.imread(sweep[sensor]['data_path'], self.color_type))
-                    results_prev['img_timestamp'].append(sweep[sensor]['timestamp'] / 1e6)
-                    results_prev['filename'].append(os.path.relpath(sweep[sensor]['data_path']))
-                    results_prev['lidar2img'].append(compose_lidar2img(
-                        results['ego2global_translation'],
-                        results['ego2global_rotation'],
-                        results['lidar2ego_translation'],
-                        results['lidar2ego_rotation'],
-                        sweep[sensor]['sensor2global_translation'],
-                        sweep[sensor]['sensor2global_rotation'],
-                        sweep[sensor]['cam_intrinsic'],
-                    ))
-
-        if len(results['sweeps']['next']) == 0:
-            print(1, len(results_next['img']) )
-            for _ in range(self.next_sweeps_num):
-                for j in range(len(cam_types)):
-                    results_next['img'].append(results['img'][j])
-                    results_next['img_timestamp'].append(results['img_timestamp'][j])
-                    results_next['filename'].append(results['filename'][j])
-                    results_next['lidar2img'].append(np.copy(results['lidar2img'][j]))
-        else:
-            choices = [(k + 1) * interval - 1 for k in range(self.next_sweeps_num)]
-
-            for idx in sorted(list(choices)):
-                sweep_idx = min(idx, len(results['sweeps']['next']) - 1)
-                sweep = results['sweeps']['next'][sweep_idx]
-
-                if len(sweep.keys()) < len(cam_types):
-                    sweep = results['sweeps']['next'][sweep_idx - 1]
-
-                for sensor in cam_types:
-                    results_next['img'].append(mmcv.imread(sweep[sensor]['data_path'], self.color_type))
-                    results_next['img_timestamp'].append(sweep[sensor]['timestamp'] / 1e6)
-                    results_next['filename'].append(os.path.relpath(sweep[sensor]['data_path']))
-                    results_next['lidar2img'].append(compose_lidar2img(
-                        results['ego2global_translation'],
-                        results['ego2global_rotation'],
-                        results['lidar2ego_translation'],
-                        results['lidar2ego_rotation'],
-                        sweep[sensor]['sensor2global_translation'],
-                        sweep[sensor]['sensor2global_rotation'],
-                        sweep[sensor]['cam_intrinsic'],
-                    ))
-
-        assert len(results_prev['img']) % 6 == 0
-        assert len(results_next['img']) % 6 == 0
-
-        for i in range(len(results_prev['img']) // 6):
-            for j in range(6):
-                results['img'].append(results_prev['img'][i * 6 + j])
-                results['img_timestamp'].append(results_prev['img_timestamp'][i * 6 + j])
-                results['filename'].append(results_prev['filename'][i * 6 + j])
-                results['lidar2img'].append(results_prev['lidar2img'][i * 6 + j])
-
-            for j in range(6):
-                results['img'].append(results_next['img'][i * 6 + j])
-                results['img_timestamp'].append(results_next['img_timestamp'][i * 6 + j])
-                results['filename'].append(results_next['filename'][i * 6 + j])
-                results['lidar2img'].append(results_next['lidar2img'][i * 6 + j])
+        for i in range(len(results['ego2lidar'])):
+            results['ego2lidar'][i] = results['ego2lidar'][i] @ torch.inverse(bda_mat).numpy()  # [4, 4] @ [4, 4]
 
         return results
