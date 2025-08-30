@@ -6,6 +6,7 @@ from mmdet3d.datasets import NuScenesDataset
 from pyquaternion import Quaternion
 import torch
 from tqdm import tqdm
+from mmdet3d.core.bbox import LiDARInstance3DBoxes
 
 def nuscenes_get_rt_matrix(
     src_sample,
@@ -149,11 +150,15 @@ class CustomNuScenesDataset(NuScenesDataset):
         all_sweeps_prev = []
         all_sweeps_prev_gts = []
         all_sweeps_prev_gts_name = []
+        all_sweeps_prev_gts_valid_flag = []
+        all_sweeps_prev_gts_velocity = []
         curr_index = index
         while len(all_sweeps_prev) < into_past:
             curr_sweeps = self.data_infos[curr_index]['sweeps']
             curr_sweeps_gts = self.data_infos[curr_index]['sweeps_gts']
             curr_sweeps_gts_name = self.data_infos[curr_index]['sweeps_gts_name']
+            curr_sweeps_gts_valid_flag = self.data_infos[curr_index]['sweeps_gts_valid_flag']
+            curr_sweeps_gts_velocity = self.data_infos[curr_index]['sweeps_gts_velocity']
             if len(curr_sweeps) == 0:
                 break
             all_sweeps_prev.extend(curr_sweeps)
@@ -162,11 +167,18 @@ class CustomNuScenesDataset(NuScenesDataset):
             all_sweeps_prev_gts.append(self.data_infos[curr_index - 1]['gt_boxes'])
             all_sweeps_prev_gts_name.extend(curr_sweeps_gts_name)
             all_sweeps_prev_gts_name.append(self.data_infos[curr_index - 1]['gt_names'])
+            all_sweeps_prev_gts_valid_flag.extend(curr_sweeps_gts_valid_flag)
+            all_sweeps_prev_gts_valid_flag.append(self.data_infos[curr_index - 1]['valid_flag'])
+            all_sweeps_prev_gts_velocity.extend(curr_sweeps_gts_velocity)
+            all_sweeps_prev_gts_velocity.append(self.data_infos[curr_index - 1]['gt_velocity'])
+
             curr_index = curr_index - 1
         
         all_sweeps_next = []
         all_sweeps_next_gts = []
         all_sweeps_next_gts_name = []
+        all_sweeps_next_gts_valid_flag = []
+        all_sweeps_next_gts_velocity = []
         curr_index = index + 1
         while len(all_sweeps_next) < into_future:
             if curr_index >= len(self.data_infos):
@@ -174,15 +186,63 @@ class CustomNuScenesDataset(NuScenesDataset):
             curr_sweeps = self.data_infos[curr_index]['sweeps']
             curr_sweeps_gts = self.data_infos[curr_index]['sweeps_gts']
             curr_sweeps_gts_name = self.data_infos[curr_index]['sweeps_gts_name']
+            curr_sweeps_gts_valid_flag = self.data_infos[curr_index]['sweeps_gts_valid_flag']
+            curr_sweeps_gts_velocity = self.data_infos[curr_index]['sweeps_gts_velocity']
             all_sweeps_next.extend(curr_sweeps[::-1])
             all_sweeps_next.append(self.data_infos[curr_index]['cams'])
             all_sweeps_next_gts.extend(curr_sweeps_gts[::-1])
             all_sweeps_next_gts.append(self.data_infos[curr_index]['gt_boxes'])
             all_sweeps_next_gts_name.extend(curr_sweeps_gts_name[::-1])
             all_sweeps_next_gts_name.append(self.data_infos[curr_index]['gt_names'])
+            all_sweeps_next_gts_valid_flag.extend(curr_sweeps_gts_valid_flag[::-1])
+            all_sweeps_next_gts_valid_flag.append(self.data_infos[curr_index]['valid_flag'])
+            all_sweeps_next_gts_velocity.extend(curr_sweeps_gts_velocity[::-1])
+            all_sweeps_next_gts_velocity.append(self.data_infos[curr_index]['gt_velocity'])
+
+
             curr_index = curr_index + 1
 
-        return all_sweeps_prev, all_sweeps_next, all_sweeps_prev_gts, all_sweeps_next_gts, all_sweeps_prev_gts_name, all_sweeps_next_gts_name
+        def get_anno_info_sweep(gts_valid_flag, gts, gts_name, gts_velocity):
+            anns_results = []
+            for masks, gt_bboxes_3ds, gt_names_3ds, gt_velocitys in zip(gts_valid_flag, gts, gts_name, gts_velocity):
+                try:    
+                    gt_bboxes_3d = gt_bboxes_3ds[masks]
+                    gt_names_3d = gt_names_3ds[masks]
+                    gt_labels_3d = []
+                    for cat in gt_names_3d:
+                        if cat in self.CLASSES:
+                            gt_labels_3d.append(self.CLASSES.index(cat))
+                        else:
+                            gt_labels_3d.append(-1)
+                    gt_labels_3d = np.array(gt_labels_3d)
+
+                    gt_velocity = gt_velocitys[masks]
+                    nan_mask = np.isnan(gt_velocity[:, 0])
+                    gt_velocity[nan_mask] = [0.0, 0.0]
+                    gt_bboxes_3d = np.concatenate([gt_bboxes_3d, gt_velocity], axis=-1)
+
+                    # the nuscenes box center is [0.5, 0.5, 0.5], we change it to be
+                    # the same as KITTI (0.5, 0.5, 0)
+                    gt_bboxes_3d = LiDARInstance3DBoxes(
+                        gt_bboxes_3d,
+                        box_dim=gt_bboxes_3d.shape[-1],
+                        origin=(0.5, 0.5, 0.5)).convert_to(self.box_mode_3d)
+
+                    anns_result = dict(
+                        gt_bboxes_3d=gt_bboxes_3d,
+                        gt_labels_3d=gt_labels_3d,
+                        gt_names=gt_names_3d)
+                    anns_results.append(anns_result)
+                except:
+                    print()
+                    
+
+            return anns_results
+        
+        all_sweeps_prev_anns_results = get_anno_info_sweep(all_sweeps_prev_gts_valid_flag, all_sweeps_prev_gts, all_sweeps_prev_gts_name, all_sweeps_prev_gts_velocity)
+        all_sweeps_next_anns_results = get_anno_info_sweep(all_sweeps_next_gts_valid_flag, all_sweeps_next_gts, all_sweeps_next_gts_name, all_sweeps_next_gts_velocity)
+
+        return all_sweeps_prev, all_sweeps_next, all_sweeps_prev_anns_results, all_sweeps_next_anns_results    
     
     def _set_sequence_group_flag(self):
         """
@@ -192,7 +252,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         res = []
         curr_sequence = 0
         for idx in range(len(self.data_infos)):
-            sweeps_prev, sweeps_next, _, _, _, _ = self.collect_sweeps(idx)
+            sweeps_prev, sweeps_next, _, _ = self.collect_sweeps(idx)
 
             if idx != 0 and len(sweeps_prev) == 0:
                 # Not first frame and # of sweeps is 0 -> new sequence
@@ -225,7 +285,7 @@ class CustomNuScenesDataset(NuScenesDataset):
 
     def get_data_info(self, index):
         info = self.data_infos[index]
-        sweeps_prev, sweeps_next, sweeps_prev_gts, sweeps_next_gts, sweeps_prev_gts_name, sweeps_next_gts_name = self.collect_sweeps(index)
+        sweeps_prev, sweeps_next, sweeps_prev_gts, sweeps_next_gts = self.collect_sweeps(index)
 
         ego2global_translation = info['ego2global_translation']
         ego2global_rotation = info['ego2global_rotation']
@@ -247,7 +307,6 @@ class CustomNuScenesDataset(NuScenesDataset):
             lidar2ego_translation=lidar2ego_translation,
             lidar2ego_rotation=lidar2ego_rotation,
             sweeps_gts={'prev': sweeps_prev_gts, 'next': sweeps_next_gts},
-            sweeps_gts_name={'prev': sweeps_prev_gts_name, 'next': sweeps_next_gts_name}
         )
 
         if self.modality['use_camera']:

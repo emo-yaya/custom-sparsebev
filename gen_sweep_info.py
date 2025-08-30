@@ -80,6 +80,8 @@ def add_sweep_info(nusc, sample_infos):
         sweep_infos = []
         sweep_infos_gt = []
         sweep_infos_gt_name = []
+        sweep_infos_gt_valid_flag = []
+        sweep_infos_gt_velocity = []
         sample_cur = sample
         if sample['prev'] != '':  # add sweep frame between two key frame
             for idx in range(5):
@@ -95,19 +97,28 @@ def add_sweep_info(nusc, sample_infos):
                 if sample_cur['prev'] == '':
                     sweep_info_gt = sweep_infos_gt[-1]
                     sweep_info_gt_name = sweep_infos_gt_name[-1]
+                    sweep_info_gt_valid_flag = sweep_infos_gt_valid_flag[-1]
+                    sweep_info_gt_velocity = sweep_infos_gt_velocity[-1]
                 else:
                     sample_prev = nusc.get('sample', sample_cur['prev'])
                     sweep_info_gt = token2info.get(sample_prev['token'])['gt_boxes']
                     sweep_info_gt_name = token2info.get(sample_prev['token'])['gt_names']
+                    sweep_info_gt_valid_flag = token2info.get(sample_prev['token'])['valid_flag']
+                    sweep_info_gt_velocity = token2info.get(sample_prev['token'])['gt_velocity']
                     sample_cur = sample_prev
                     
                 sweep_infos_gt.append(sweep_info_gt)
                 sweep_infos_gt_name.append(sweep_info_gt_name)
+                sweep_infos_gt_valid_flag.append(sweep_info_gt_valid_flag)
+                sweep_infos_gt_velocity.append(sweep_info_gt_velocity)
                 sweep_infos.append(sweep_info)
 
+        breakpoint()
         sample_infos['infos'][curr_id]['sweeps'] = sweep_infos
         sample_infos['infos'][curr_id]['sweeps_gts'] = sweep_infos_gt
         sample_infos['infos'][curr_id]['sweeps_gts_name'] = sweep_infos_gt_name
+        sample_infos['infos'][curr_id]['sweeps_gts_valid_flag'] = sweep_infos_gt_valid_flag
+        sample_infos['infos'][curr_id]['sweeps_gts_velocity'] = sweep_infos_gt_velocity
 
     return sample_infos
 
