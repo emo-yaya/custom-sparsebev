@@ -146,7 +146,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         self._set_sequence_group_flag()
 
 
-    def collect_sweeps(self, index, into_past=60, into_future=60):
+    def collect_sweeps(self, index, into_past=60, into_future=60, need=True):
         all_sweeps_prev = []
         all_sweeps_prev_gts = []
         all_sweeps_prev_gts_name = []
@@ -205,40 +205,37 @@ class CustomNuScenesDataset(NuScenesDataset):
         def get_anno_info_sweep(gts_valid_flag, gts, gts_name, gts_velocity):
             anns_results = []
             for masks, gt_bboxes_3ds, gt_names_3ds, gt_velocitys in zip(gts_valid_flag, gts, gts_name, gts_velocity):
-                try:    
-                    gt_bboxes_3d = gt_bboxes_3ds[masks]
-                    gt_names_3d = gt_names_3ds[masks]
-                    gt_labels_3d = []
-                    for cat in gt_names_3d:
-                        if cat in self.CLASSES:
-                            gt_labels_3d.append(self.CLASSES.index(cat))
-                        else:
-                            gt_labels_3d.append(-1)
-                    gt_labels_3d = np.array(gt_labels_3d)
+                gt_bboxes_3d = gt_bboxes_3ds[masks]
+                gt_names_3d = gt_names_3ds[masks]
+                gt_labels_3d = []
+                for cat in gt_names_3d:
+                    if cat in self.CLASSES:
+                        gt_labels_3d.append(self.CLASSES.index(cat))
+                    else:
+                        gt_labels_3d.append(-1)
+                gt_labels_3d = np.array(gt_labels_3d)
 
-                    gt_velocity = gt_velocitys[masks]
-                    nan_mask = np.isnan(gt_velocity[:, 0])
-                    gt_velocity[nan_mask] = [0.0, 0.0]
-                    gt_bboxes_3d = np.concatenate([gt_bboxes_3d, gt_velocity], axis=-1)
+                gt_velocity = gt_velocitys[masks]
+                nan_mask = np.isnan(gt_velocity[:, 0])
+                gt_velocity[nan_mask] = [0.0, 0.0]
+                gt_bboxes_3d = np.concatenate([gt_bboxes_3d, gt_velocity], axis=-1)
 
-                    # the nuscenes box center is [0.5, 0.5, 0.5], we change it to be
-                    # the same as KITTI (0.5, 0.5, 0)
-                    gt_bboxes_3d = LiDARInstance3DBoxes(
-                        gt_bboxes_3d,
-                        box_dim=gt_bboxes_3d.shape[-1],
-                        origin=(0.5, 0.5, 0.5)).convert_to(self.box_mode_3d)
+                # the nuscenes box center is [0.5, 0.5, 0.5], we change it to be
+                # the same as KITTI (0.5, 0.5, 0)
+                gt_bboxes_3d = LiDARInstance3DBoxes(
+                    gt_bboxes_3d,
+                    box_dim=gt_bboxes_3d.shape[-1],
+                    origin=(0.5, 0.5, 0.5)).convert_to(self.box_mode_3d)
 
-                    anns_result = dict(
-                        gt_bboxes_3d=gt_bboxes_3d,
-                        gt_labels_3d=gt_labels_3d,
-                        gt_names=gt_names_3d)
-                    anns_results.append(anns_result)
-                except:
-                    print()
-                    
-
+                anns_result = dict(
+                    gt_bboxes_3d=gt_bboxes_3d,
+                    gt_labels_3d=gt_labels_3d,
+                    gt_names=gt_names_3d)
+                anns_results.append(anns_result)
             return anns_results
-        
+        if not need:
+            return all_sweeps_prev, all_sweeps_next, [], []   
+         
         all_sweeps_prev_anns_results = get_anno_info_sweep(all_sweeps_prev_gts_valid_flag, all_sweeps_prev_gts, all_sweeps_prev_gts_name, all_sweeps_prev_gts_velocity)
         all_sweeps_next_anns_results = get_anno_info_sweep(all_sweeps_next_gts_valid_flag, all_sweeps_next_gts, all_sweeps_next_gts_name, all_sweeps_next_gts_velocity)
 
@@ -252,7 +249,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         res = []
         curr_sequence = 0
         for idx in range(len(self.data_infos)):
-            sweeps_prev, sweeps_next, _, _ = self.collect_sweeps(idx)
+            sweeps_prev, sweeps_next, _, _ = self.collect_sweeps(idx, need=False)
 
             if idx != 0 and len(sweeps_prev) == 0:
                 # Not first frame and # of sweeps is 0 -> new sequence
