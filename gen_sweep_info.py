@@ -221,7 +221,7 @@ if __name__ == '__main__':
         sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_val.pkl'), 'rb'))
         sample_infos = add_sweep_info(nusc, sample_infos)
         mmcv.dump(sample_infos, os.path.join(args.data_root, 'nuscenes_infos_val_sweep.pkl'))
-        # add_ann_adj_info(nusc)
+        add_ann_adj_info(nusc)
 
     elif args.version == 'v1.0-test':
         sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_test.pkl'), 'rb'))

@@ -85,11 +85,11 @@ class SparseBEVTransformerDecoder(BaseModule):
             mlvl_feats[lvl] = feat.contiguous()
 
         for lvl, feat in enumerate(bev_queries):
-            B, TNGC, H, W, Z = feat.shape  # [B, TN, GC, H, W, Z]
+            B, TNGC, H, W = feat.shape  # [B, TN, GC, H, W, Z]
             N, T, G, C = 1, 1, 4, TNGC // 4
-            feat = feat.reshape(B, T, N, G, C, H, W, Z)
+            feat = feat.reshape(B, T, N, G, C, H, W)
 
-            feat = feat.reshape(B*T*G, C, N, H, W, Z)
+            feat = feat.reshape(B*T*G, C, N, H, W)
             
             bev_queries[lvl] = feat.contiguous()
 
@@ -196,7 +196,7 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
 
         fusion_weight = self.fusion_gate(torch.cat([query_feat_cam, query_feat_bev], dim=-1))
 
-        query_feat = fusion_weight * 0 * query_feat_cam + 1 * query_feat_bev
+        query_feat = fusion_weight * query_feat_cam + (1 - fusion_weight) * query_feat_bev
 
         query_feat = self.norm3(self.ffn(query_feat))
 
@@ -290,7 +290,7 @@ class SparseBEVSampling(BaseModule):
         self.sampling_offset = nn.Linear(embed_dims, num_groups * num_points * 3)
         self.scale_weights = nn.Linear(embed_dims, num_groups * num_points * num_levels)
 
-        self.bev_num_levels = 3
+        self.bev_num_levels = 1
         self.bev_scale_weights = nn.Linear(embed_dims, num_groups * num_points * self.bev_num_levels)
 
     def init_weights(self):

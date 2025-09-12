@@ -74,11 +74,10 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
     sample_points_cam[..., 0] /= image_w
     sample_points_cam[..., 1] /= image_h
 
-    sample_points_bev = sample_points_bev[..., 0:3]
+    sample_points_bev = sample_points_bev[..., 0:2]
     
     sample_points_bev[..., 0] = (sample_points_bev[..., 0] - pc_range[0]) / (pc_range[3] - pc_range[0])
     sample_points_bev[..., 1] = (sample_points_bev[..., 1] - pc_range[1]) / (pc_range[4] - pc_range[1])
-    sample_points_bev[..., 2] = (sample_points_bev[..., 2] - pc_range[2]) / (pc_range[5] - pc_range[2])
 
     # check if out of image
     valid_mask = ((homo > eps) \
@@ -93,8 +92,6 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
         & (sample_points_bev[..., 1:2] < 1.0)
         & (sample_points_bev[..., 0:1] > 0.0)
         & (sample_points_bev[..., 0:1] < 1.0)
-        & (sample_points_bev[..., 2:3] > 0.0)
-        & (sample_points_bev[..., 2:3] < 1.0)
     ).squeeze(-1).float()  # [B, T, N, Q, GP]
 
     # for visualization only
@@ -135,6 +132,7 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
     sample_points_cam = torch.cat([sample_points_cam, i_view[..., None].float() / (N - 1)], dim=-1)
     # TODO: bev xyz  cam xy view？ how to process here
     # sample_points_bev = sample_points_bev
+    sample_points_bev = torch.cat([sample_points_bev, i_view_bev[..., None].float() / (N - 1)], dim=-1)
 
     # reorganize the tensor to stack T and G to the batch dim for better parallelism
     sample_points_cam = sample_points_cam.reshape(B, T, Q, G, P, 1, 3)

@@ -45,7 +45,7 @@ def msmv_sampling_bev(bev_feats, sampling_locations, scale_weights):
     """
     assert scale_weights.shape[-1] == len(bev_feats)
 
-    B, C, _, _, _, _ = bev_feats[0].shape
+    B, C, _, _, _ = bev_feats[0].shape
     _, Q, P, _ = sampling_locations.shape
 
     sampling_locations = sampling_locations * 2 - 1
@@ -55,7 +55,7 @@ def msmv_sampling_bev(bev_feats, sampling_locations, scale_weights):
 
     for lvl, feat in enumerate(bev_feats):
         # feat (B*T*G, C, N, H, W, Z)
-        feat = feat.permute(0, 1, 5, 3, 4, 2).squeeze(-1)
+        feat = feat.permute(0, 1, 3, 4, 2)
         out = F.grid_sample(
             feat, sampling_locations, mode='bilinear',
             padding_mode='zeros', align_corners=True,

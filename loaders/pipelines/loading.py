@@ -788,6 +788,8 @@ class PrepareImageInputs(object):
 
     def get_inputs(self, results, flip=None, scale=None):
         imgs = []
+        img_timestamp = []
+        lidar2img = []
         sensor2egos = []
         ego2globals = []
         intrins = []
@@ -831,7 +833,7 @@ class PrepareImageInputs(object):
 
             canvas.append(np.array(img))
             imgs.append(self.normalize_img(img))
-
+            
             if self.sequential:
                 assert 'adjacent' in results
                 for adj_info in results['adjacent']:
@@ -857,7 +859,23 @@ class PrepareImageInputs(object):
             ego2globals.append(ego2global)
             post_rots.append(post_rot)
             post_trans.append(post_tran)
+            img_timestamp.append(cam_data['timestamp'] / 1e6)
+            # obtain lidar to image transformation matrix
+            lidar2cam_r = np.linalg.inv(cam_data['sensor2lidar_rotation'])
+            lidar2cam_t = cam_data['sensor2lidar_translation'] @ lidar2cam_r.T
 
+            lidar2cam_rt = np.eye(4)
+            lidar2cam_rt[:3, :3] = lidar2cam_r.T
+            lidar2cam_rt[3, :3] = -lidar2cam_t
+            
+            intrinsic = cam_data['cam_intrinsic']
+            viewpad = np.eye(4)
+            viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
+            ida_mat = np.eye(4)
+            ida_mat[:2, :2] = post_rot2
+            ida_mat[:2, 2] = post_tran2
+            lidar2img.append(ida_mat @ viewpad @ lidar2cam_rt.T)
+            
         if self.sequential:
             for adj_info in results['adjacent']:
                 post_trans.extend(post_trans[:len(cam_names)])
@@ -879,6 +897,8 @@ class PrepareImageInputs(object):
         post_rots = torch.stack(post_rots)
         post_trans = torch.stack(post_trans)
         results['canvas'] = canvas
+        results['img_timestamp'] = img_timestamp
+        results['lidar2img'] = lidar2img
         return (imgs, sensor2egos, ego2globals, intrins, post_rots, post_trans)
 
     def __call__(self, results):
