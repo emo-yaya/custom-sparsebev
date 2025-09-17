@@ -190,6 +190,9 @@ class LSSViewTransformer(BaseModule):
         points = bda[:, :3, :3].view(B, 1, 1, 1, 1, 3, 3).matmul(
             points.unsqueeze(-1)).squeeze(-1)
         points += bda[:, :3, 3].view(B, 1, 1, 1, 1, 3)
+        # ego → lidar
+        points = ego2global[:, :,:3,:3].view(B, N, 1, 1, 1, 3, 3).matmul(points.unsqueeze(-1)).squeeze(-1)
+        points += ego2global[:, :,:3,3].view(B, N, 1, 1, 1, 3)
         return points
 
     def init_acceleration_v2(self, coor):

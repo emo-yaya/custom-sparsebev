@@ -54,6 +54,7 @@ grid_config = {
     'depth': [1.0, 60.0, 1.0],
 } 
 
+# voxel_size = [0.2, 0.2, 8]
 voxel_size = [0.1, 0.1, 0.2]
 
 depth_categories = 59 #(grid_config['depth'][1]-grid_config['depth'][0])//grid_config['depth'][2]
@@ -126,6 +127,18 @@ model = dict(
             loss_weight=2.0),
         loss_bbox=dict(type='L1Loss', loss_weight=0.25),
         loss_iou=dict(type='GIoULoss', loss_weight=0.0)),
+    train_cfg=dict(pts=dict(
+        grid_size=[512, 512, 1],
+        voxel_size=voxel_size,
+        point_cloud_range=point_cloud_range,
+        out_size_factor=4,
+        assigner=dict(
+            type='HungarianAssigner3D',
+            cls_cost=dict(type='FocalLossCost', weight=2.0),
+            reg_cost=dict(type='BBox3DL1Cost', weight=0.25),
+            iou_cost=dict(type='IoUCost', weight=0.0),
+        )
+    )),
     bev_pts_bbox_head=dict(
         type='CenterHead',
         in_channels=256,
@@ -155,18 +168,6 @@ model = dict(
         loss_bbox=dict(type='L1Loss', reduction='mean', loss_weight=0.25),
         norm_bbox=True),
     # model training and testing settings
-    train_cfg=dict(pts=dict(
-        grid_size=[1024, 1024, 40],
-        voxel_size=voxel_size,
-        point_cloud_range=point_cloud_range,
-        out_size_factor=8,
-        assigner=dict(
-            type='HungarianAssigner3D',
-            cls_cost=dict(type='FocalLossCost', weight=2.0),
-            reg_cost=dict(type='BBox3DL1Cost', weight=0.25),
-            iou_cost=dict(type='IoUCost', weight=0.0),
-        )
-    )),
     bev_train_cfg=dict(
         pts=dict(
             point_cloud_range=point_cloud_range,
@@ -231,11 +232,17 @@ data_config = {
     'resize_test': 0.00,
 }
 
+# bda_aug_conf = dict(
+#     rot_lim=(-22.5, 22.5),
+#     scale_lim=(0.95, 1.05),
+#     flip_dx_ratio=0.5,
+#     flip_dy_ratio=0.5
+# )
 bda_aug_conf = dict(
-    rot_lim=(-22.5, 22.5),
-    scale_lim=(0.95, 1.05),
-    flip_dx_ratio=0.5,
-    flip_dy_ratio=0.5
+    rot_lim=(0, 0),
+    scale_lim=(1, 1),
+    flip_dx_ratio=0,
+    flip_dy_ratio=0
 )
 file_client_args = dict(backend='disk')
 
@@ -344,7 +351,7 @@ lr_config = dict(
     min_lr_ratio=1e-3
 )
 total_epochs = 24
-batch_size = 1
+batch_size = 8
 
 # load pretrained weights
 load_from = 'pretrain/fbocc-r50-cbgs_depth_16f_16x4_20e.pth'

@@ -790,6 +790,7 @@ class PrepareImageInputs(object):
         imgs = []
         img_timestamp = []
         lidar2img = []
+        ego2lidars = []
         sensor2egos = []
         ego2globals = []
         intrins = []
@@ -875,7 +876,19 @@ class PrepareImageInputs(object):
             ida_mat[:2, :2] = post_rot2
             ida_mat[:2, 2] = post_tran2
             lidar2img.append(ida_mat @ viewpad @ lidar2cam_rt.T)
-            
+
+            q = Quaternion(results['curr']['lidar2ego_rotation'])
+            R_l2e = torch.tensor(q.rotation_matrix, dtype=torch.float32)   # (3,3)
+            t_l2e = torch.tensor(results['curr']['lidar2ego_translation'], dtype=torch.float32)  # (3,)
+
+            R_e2l = R_l2e.t()                     # R^T
+            t_e2l = - R_e2l.matmul(t_l2e)         # -R^T * t
+
+            ego2lidar = torch.eye(4, dtype=torch.float32)
+            ego2lidar[:3, :3] = R_e2l
+            ego2lidar[:3, 3]  = t_e2l
+            ego2lidars.append(ego2lidar)
+
         if self.sequential:
             for adj_info in results['adjacent']:
                 post_trans.extend(post_trans[:len(cam_names)])
@@ -896,10 +909,11 @@ class PrepareImageInputs(object):
         intrins = torch.stack(intrins)
         post_rots = torch.stack(post_rots)
         post_trans = torch.stack(post_trans)
+        ego2lidars = torch.stack(ego2lidars)
         results['canvas'] = canvas
         results['img_timestamp'] = img_timestamp
         results['lidar2img'] = lidar2img
-        return (imgs, sensor2egos, ego2globals, intrins, post_rots, post_trans)
+        return (imgs, sensor2egos, ego2lidars, intrins, post_rots, post_trans)
 
     def __call__(self, results):
         results['img_inputs'] = self.get_inputs(results)

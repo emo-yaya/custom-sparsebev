@@ -519,6 +519,8 @@ class NuScenesDataset(Custom3DDataset):
                 box_vel.append(0)
                 quat = pyquaternion.Quaternion(axis=[0, 0, 1], radians=box_yaw)
                 nusc_box = NuScenesBox(center, wlh, quat, velocity=box_vel)
+                nusc_box.rotate(pyquaternion.Quaternion(self.data_infos[sample_id]['lidar2ego_rotation']))
+                nusc_box.translate(np.array(self.data_infos[sample_id]['lidar2ego_translation']))
                 nusc_box.rotate(rot)
                 nusc_box.translate(trans)
                 if np.sqrt(nusc_box.velocity[0]**2 +

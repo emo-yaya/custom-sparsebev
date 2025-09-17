@@ -149,8 +149,13 @@ def get_gt(info):
     ego2global_rotation = info['cams']['CAM_FRONT']['ego2global_rotation']
     ego2global_translation = info['cams']['CAM_FRONT'][
         'ego2global_translation']
+    lidar2ego_rotation = info['lidar2ego_rotation']
+    lidar2ego_translation = info['lidar2ego_translation']
+
     trans = -np.array(ego2global_translation)
     rot = Quaternion(ego2global_rotation).inverse
+    trans_l2e = -np.array(lidar2ego_translation)
+    rot_l2e = Quaternion(lidar2ego_rotation).inverse
     gt_boxes = list()
     gt_labels = list()
     for ann_info in info['ann_infos']:
@@ -167,6 +172,8 @@ def get_gt(info):
         )
         box.translate(trans)
         box.rotate(rot)
+        box.translate(trans_l2e)
+        box.rotate(rot_l2e)
         box_xyz = np.array(box.center)
         box_dxdydz = np.array(box.wlh)[[1, 0, 2]]
         box_yaw = np.array([box.orientation.yaw_pitch_roll[0]])
