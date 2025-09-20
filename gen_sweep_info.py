@@ -192,7 +192,7 @@ def add_ann_adj_info(nuscenes, base_name, suffix):
     # nuscenes = NuScenes(nuscenes_version, dataroot)
     for set in ['train', 'val']:
         dataset = pickle.load(
-            open(f'./data/nuscenes/f"{base_name}_{set}_{suffix}.pkl', 'rb'))
+            open(f'./data/nuscenes/{base_name}_{set}_{suffix}.pkl', 'rb'))
         for id in range(len(dataset['infos'])):
             if id % 10 == 0:
                 print('%d/%d' % (id, len(dataset['infos'])))
@@ -214,7 +214,7 @@ def add_ann_adj_info(nuscenes, base_name, suffix):
             scene = nuscenes.get('scene', sample['scene_token'])
             dataset['infos'][id]['occ_path'] = \
                 './data/nuscenes/gts/%s/%s'%(scene['name'], info['token'])
-        with open(f'./data/nuscenes/f"{base_name}_{set}_{suffix}.pkl', 'wb') as fid:
+        with open(f'./data/nuscenes/{base_name}_{set}_{suffix}.pkl', 'wb') as fid:
             pickle.dump(dataset, fid)
 
 if __name__ == '__main__':
@@ -223,10 +223,10 @@ if __name__ == '__main__':
     if args.version == 'v1.0-trainval':
         base_name = "nuscenes_infos"
         suffix = "sweep"  
-        for split in ["train", "val"]:
-            sample_infos = pickle.load(open(os.path.join(args.data_root, f"{base_name}_{split}.pkl"), 'rb'))
-            sample_infos = add_sweep_info(nusc, sample_infos)
-            mmcv.dump(sample_infos, os.path.join(args.data_root, f"{base_name}_{split}_{suffix}.pkl"))
+        # for set in ["train", "val"]:
+        #     sample_infos = pickle.load(open(os.path.join(args.data_root, f"{base_name}_{set}.pkl"), 'rb'))
+        #     sample_infos = add_sweep_info(nusc, sample_infos)
+        #     mmcv.dump(sample_infos, os.path.join(args.data_root, f"{base_name}_{set}_{suffix}.pkl"))
 
         add_ann_adj_info(nusc, base_name, suffix)
 
