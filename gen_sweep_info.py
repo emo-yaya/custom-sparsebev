@@ -223,10 +223,10 @@ if __name__ == '__main__':
     if args.version == 'v1.0-trainval':
         base_name = "nuscenes_infos"
         suffix = "sweep"  
-        # for set in ["train", "val"]:
-        #     sample_infos = pickle.load(open(os.path.join(args.data_root, f"{base_name}_{set}.pkl"), 'rb'))
-        #     sample_infos = add_sweep_info(nusc, sample_infos)
-        #     mmcv.dump(sample_infos, os.path.join(args.data_root, f"{base_name}_{set}_{suffix}.pkl"))
+        for set in ["train", "val"]:
+            sample_infos = pickle.load(open(os.path.join(args.data_root, f"{base_name}_{set}.pkl"), 'rb'))
+            sample_infos = add_sweep_info(nusc, sample_infos)
+            mmcv.dump(sample_infos, os.path.join(args.data_root, f"{base_name}_{set}_{suffix}.pkl"))
 
         add_ann_adj_info(nusc, base_name, suffix)
 
