@@ -186,13 +186,13 @@ def get_gt(info):
     return gt_boxes, gt_labels
 
 
-def add_ann_adj_info(nuscenes):
+def add_ann_adj_info(nuscenes, base_name, suffix):
     # nuscenes_version = 'v1.0-trainval'
     # dataroot = './data/nuscenes/'
     # nuscenes = NuScenes(nuscenes_version, dataroot)
     for set in ['train', 'val']:
         dataset = pickle.load(
-            open('./data/nuscenes/nuscenes_infos_%s_sweep.pkl' % (set), 'rb'))
+            open(f'./data/nuscenes/f"{base_name}_{set}_{suffix}.pkl', 'rb'))
         for id in range(len(dataset['infos'])):
             if id % 10 == 0:
                 print('%d/%d' % (id, len(dataset['infos'])))
@@ -214,21 +214,21 @@ def add_ann_adj_info(nuscenes):
             scene = nuscenes.get('scene', sample['scene_token'])
             dataset['infos'][id]['occ_path'] = \
                 './data/nuscenes/gts/%s/%s'%(scene['name'], info['token'])
-        with open('./data/nuscenes/nuscenes_infos_%s_sweep.pkl' % (set), 'wb') as fid:
+        with open(f'./data/nuscenes/f"{base_name}_{set}_{suffix}.pkl', 'wb') as fid:
             pickle.dump(dataset, fid)
 
 if __name__ == '__main__':
     nusc = NuScenes(args.version, args.data_root)
 
     if args.version == 'v1.0-trainval':
-        sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_train.pkl'), 'rb'))
-        sample_infos = add_sweep_info(nusc, sample_infos)
-        mmcv.dump(sample_infos, os.path.join(args.data_root, 'nuscenes_infos_train_sweep.pkl'))
+        base_name = "nuscenes_infos"
+        suffix = "sweep"  
+        for split in ["train", "val"]:
+            sample_infos = pickle.load(open(os.path.join(args.data_root, f"{base_name}_{split}.pkl"), 'rb'))
+            sample_infos = add_sweep_info(nusc, sample_infos)
+            mmcv.dump(sample_infos, os.path.join(args.data_root, f"{base_name}_{split}_{suffix}.pkl"))
 
-        sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_val.pkl'), 'rb'))
-        sample_infos = add_sweep_info(nusc, sample_infos)
-        mmcv.dump(sample_infos, os.path.join(args.data_root, 'nuscenes_infos_val_sweep.pkl'))
-        add_ann_adj_info(nusc)
+        add_ann_adj_info(nusc, base_name, suffix)
 
     elif args.version == 'v1.0-test':
         sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_test.pkl'), 'rb'))
