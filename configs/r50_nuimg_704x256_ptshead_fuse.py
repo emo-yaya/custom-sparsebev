@@ -24,7 +24,7 @@ point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 embed_dims = 256
 num_layers = 6
 num_query = 900
-num_frames = 1
+num_frames = 8
 num_levels = 4
 num_points = 4
 
@@ -226,7 +226,7 @@ data_config = {
 
     # Augmentation
     'resize': (-0.06, 0.11),
-    'rot': (-5.4, 5.4),
+    'rot': (0.0, 0.0),
     'flip': True,
     'crop_h': (0.0, 0.0),
     'resize_test': 0.00,
@@ -250,6 +250,7 @@ train_pipeline = [
     dict(
         type='PrepareImageInputs',
         is_train=True,
+        sequential=True,
         data_config=data_config),
     dict(type='LoadAnnotations'),
     dict(
@@ -265,7 +266,7 @@ train_pipeline = [
 ]
 
 test_pipeline = [
-    dict(type='PrepareImageInputs', data_config=data_config),
+    dict(type='PrepareImageInputs', sequential=True, data_config=data_config),
     dict(type='LoadAnnotations'),
     dict(type='BEVAug',
          bda_aug_conf=bda_aug_conf,
@@ -305,6 +306,7 @@ data = dict(
         modality=input_modality,
         test_mode=False,
         use_valid_flag=True,
+        multi_adj_frame_id_cfg=[1, num_frames, 1],
         box_type_3d='LiDAR'),
     val=dict(
         type=dataset_type,
@@ -314,6 +316,7 @@ data = dict(
         classes=class_names,
         modality=input_modality,
         test_mode=True,
+        multi_adj_frame_id_cfg=[1, num_frames, 1],
         box_type_3d='LiDAR'),
     test=dict(
         type=dataset_type,
@@ -323,6 +326,7 @@ data = dict(
         classes=class_names,
         modality=input_modality,
         test_mode=True,
+        multi_adj_frame_id_cfg=[1, num_frames, 1],
         box_type_3d='LiDAR')
 )
 

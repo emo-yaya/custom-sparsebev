@@ -510,10 +510,10 @@ class SparseBEV(MVXTwoStageDetector):
         outs = self.bev_pts_bbox_head(x)
         bbox_list = self.bev_pts_bbox_head.get_bboxes(outs, img_metas, rescale=rescale)
 
-        bbox_results = [
-            bbox3d2result(bboxes, scores, labels)
-            for bboxes, scores, labels in bbox_list
-        ]
+        # bbox_results = [
+        #     bbox3d2result(bboxes, scores, labels)
+        #     for bboxes, scores, labels in bbox_list
+        # ]
 
         return bbox_list
     
@@ -521,10 +521,10 @@ class SparseBEV(MVXTwoStageDetector):
         outs = self.pts_bbox_head(x, img_metas, lss_bev)
         bbox_list = self.pts_bbox_head.get_bboxes(outs, img_metas[0], rescale=rescale)
 
-        bbox_results = [
-            bbox3d2result(bboxes, scores, labels)
-            for bboxes, scores, labels in bbox_list
-        ]
+        # bbox_results = [
+        #     bbox3d2result(bboxes, scores, labels)
+        #     for bboxes, scores, labels in bbox_list
+        # ]
 
         return bbox_list
 

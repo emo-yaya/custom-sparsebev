@@ -413,8 +413,8 @@ class NuScenesDataset(Custom3DDataset):
             "ego", "ego"))
         if self.modality['use_camera']:
             input_dict.update(dict(curr=info))
-            # info_adj_list = self.get_adj_info(info, index)
-            # input_dict.update(dict(adjacent=info_adj_list))
+            info_adj_list = self.get_adj_info(info, index)
+            input_dict.update(dict(adjacent=info_adj_list))
         return input_dict
 
     def get_adj_info(self, info, index):
@@ -499,32 +499,16 @@ class NuScenesDataset(Custom3DDataset):
 
         print('Start to convert detection format...')
         for sample_id, det in enumerate(mmcv.track_iter_progress(results)):
-            boxes = det['boxes_3d'].tensor.numpy()
-            scores = det['scores_3d'].numpy()
-            labels = det['labels_3d'].numpy()
+            annos = []
+            boxes = output_to_nusc_box(det, self.with_velocity)
             sample_token = self.data_infos[sample_id]['token']
-
-            trans = self.data_infos[sample_id]['cams'][
-                self.ego_cam]['ego2global_translation']
-            rot = self.data_infos[sample_id]['cams'][
-                self.ego_cam]['ego2global_rotation']
-            rot = pyquaternion.Quaternion(rot)
-            annos = list()
+            boxes = lidar_nusc_box_to_global(self.data_infos[sample_id], boxes,
+                                             mapped_class_names,
+                                             self.eval_detection_configs,
+                                             self.eval_version)
             for i, box in enumerate(boxes):
-                name = mapped_class_names[labels[i]]
-                center = box[:3]
-                wlh = box[[4, 3, 5]]
-                box_yaw = box[6]
-                box_vel = box[7:].tolist()
-                box_vel.append(0)
-                quat = pyquaternion.Quaternion(axis=[0, 0, 1], radians=box_yaw)
-                nusc_box = NuScenesBox(center, wlh, quat, velocity=box_vel)
-                nusc_box.rotate(pyquaternion.Quaternion(self.data_infos[sample_id]['lidar2ego_rotation']))
-                nusc_box.translate(np.array(self.data_infos[sample_id]['lidar2ego_translation']))
-                nusc_box.rotate(rot)
-                nusc_box.translate(trans)
-                if np.sqrt(nusc_box.velocity[0]**2 +
-                           nusc_box.velocity[1]**2) > 0.2:
+                name = mapped_class_names[box.label]
+                if np.sqrt(box.velocity[0]**2 + box.velocity[1]**2) > 0.2:
                     if name in [
                             'car',
                             'construction_vehicle',
@@ -536,30 +520,26 @@ class NuScenesDataset(Custom3DDataset):
                     elif name in ['bicycle', 'motorcycle']:
                         attr = 'cycle.with_rider'
                     else:
-                        attr = self.DefaultAttribute[name]
+                        attr = NuScenesDataset.DefaultAttribute[name]
                 else:
                     if name in ['pedestrian']:
                         attr = 'pedestrian.standing'
                     elif name in ['bus']:
                         attr = 'vehicle.stopped'
                     else:
-                        attr = self.DefaultAttribute[name]
+                        attr = NuScenesDataset.DefaultAttribute[name]
+
                 nusc_anno = dict(
                     sample_token=sample_token,
-                    translation=nusc_box.center.tolist(),
-                    size=nusc_box.wlh.tolist(),
-                    rotation=nusc_box.orientation.elements.tolist(),
-                    velocity=nusc_box.velocity[:2],
+                    translation=box.center.tolist(),
+                    size=box.wlh.tolist(),
+                    rotation=box.orientation.elements.tolist(),
+                    velocity=box.velocity[:2].tolist(),
                     detection_name=name,
-                    detection_score=float(scores[i]),
-                    attribute_name=attr,
-                )
+                    detection_score=box.score,
+                    attribute_name=attr)
                 annos.append(nusc_anno)
-            # other views results of the same frame should be concatenated
-            if sample_token in nusc_annos:
-                nusc_annos[sample_token].extend(annos)
-            else:
-                nusc_annos[sample_token] = annos
+            nusc_annos[sample_token] = annos
         nusc_submissions = {
             'meta': self.modality,
             'results': nusc_annos,

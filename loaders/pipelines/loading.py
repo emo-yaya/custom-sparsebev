@@ -834,33 +834,6 @@ class PrepareImageInputs(object):
 
             canvas.append(np.array(img))
             imgs.append(self.normalize_img(img))
-            
-            if self.sequential:
-                assert 'adjacent' in results
-                for adj_info in results['adjacent']:
-                    filename_adj = adj_info['cams'][cam_name]['data_path']
-                    img_adjacent = Image.open(filename_adj)
-                    if self.opencv_pp:
-                        img_adjacent = \
-                            self.img_transform_core_opencv(
-                                img_adjacent,
-                                post_rot[:2, :2],
-                                post_tran[:2],
-                                crop)
-                    else:
-                        img_adjacent = self.img_transform_core(
-                            img_adjacent,
-                            resize_dims=resize_dims,
-                            crop=crop,
-                            flip=flip,
-                            rotate=rotate)
-                    imgs.append(self.normalize_img(img_adjacent))
-            intrins.append(intrin)
-            sensor2egos.append(sensor2ego)
-            ego2globals.append(ego2global)
-            post_rots.append(post_rot)
-            post_trans.append(post_tran)
-            img_timestamp.append(cam_data['timestamp'] / 1e6)
             # obtain lidar to image transformation matrix
             lidar2cam_r = np.linalg.inv(cam_data['sensor2lidar_rotation'])
             lidar2cam_t = cam_data['sensor2lidar_translation'] @ lidar2cam_r.T
@@ -888,6 +861,57 @@ class PrepareImageInputs(object):
             ego2lidar[:3, :3] = R_e2l
             ego2lidar[:3, 3]  = t_e2l
             ego2lidars.append(ego2lidar)
+            if self.sequential:
+                assert 'adjacent' in results
+                for adj_info in results['adjacent']:
+                    filename_adj = adj_info['cams'][cam_name]['data_path']
+                    img_adjacent = Image.open(filename_adj)
+                    if self.opencv_pp:
+                        img_adjacent = \
+                            self.img_transform_core_opencv(
+                                img_adjacent,
+                                post_rot[:2, :2],
+                                post_tran[:2],
+                                crop)
+                    else:
+                        img_adjacent = self.img_transform_core(
+                            img_adjacent,
+                            resize_dims=resize_dims,
+                            crop=crop,
+                            flip=flip,
+                            rotate=rotate)
+                    imgs.append(self.normalize_img(img_adjacent))
+                    lidar2cam_r = np.linalg.inv(adj_info['cams'][cam_name]['sensor2lidar_rotation'])
+                    lidar2cam_t = adj_info['cams'][cam_name]['sensor2lidar_translation'] @ lidar2cam_r.T
+
+                    lidar2cam_rt = np.eye(4)
+                    lidar2cam_rt[:3, :3] = lidar2cam_r.T
+                    lidar2cam_rt[3, :3] = -lidar2cam_t
+                    
+                    intrinsic = adj_info['cams'][cam_name]['cam_intrinsic']
+                    viewpad = np.eye(4)
+                    viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
+                    
+                    lidar2img.append(ida_mat @ viewpad @ lidar2cam_rt.T)
+
+                    q = Quaternion(adj_info['lidar2ego_rotation'])
+                    R_l2e = torch.tensor(q.rotation_matrix, dtype=torch.float32)   # (3,3)
+                    t_l2e = torch.tensor(adj_info['lidar2ego_translation'], dtype=torch.float32)  # (3,)
+
+                    R_e2l = R_l2e.t()                     # R^T
+                    t_e2l = - R_e2l.matmul(t_l2e)         # -R^T * t
+
+                    ego2lidar = torch.eye(4, dtype=torch.float32)
+                    ego2lidar[:3, :3] = R_e2l
+                    ego2lidar[:3, 3]  = t_e2l
+                    ego2lidars.append(ego2lidar)
+            intrins.append(intrin)
+            sensor2egos.append(sensor2ego)
+            ego2globals.append(ego2global)
+            post_rots.append(post_rot)
+            post_trans.append(post_tran)
+            img_timestamp.append(cam_data['timestamp'] / 1e6)
+            
 
         if self.sequential:
             for adj_info in results['adjacent']:

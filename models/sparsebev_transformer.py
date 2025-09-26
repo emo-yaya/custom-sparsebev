@@ -153,7 +153,7 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
         self.reg_branch = nn.Sequential(*reg_branch)
         
         # self.sampling_bev = CustomBEVSampling(embed_dims, num_frames=1, num_groups=4, num_points=num_points, num_levels=3, pc_range=pc_range)
-        self.mixing_bev = AdaptiveMixing(in_dim=embed_dims, in_points=num_points * num_frames, n_groups=4, out_points=128)
+        self.mixing_bev = AdaptiveMixing(in_dim=embed_dims, in_points=num_points * 1, n_groups=4, out_points=128)
         self.norm_bev = nn.LayerNorm(embed_dims)
 
         self.fusion_gate = nn.Sequential(
@@ -333,7 +333,7 @@ class SparseBEVSampling(BaseModule):
         # scale bev weights
         bev_scale_weights = self.bev_scale_weights(query_feat).view(B, Q, self.num_groups, 1, self.num_points, self.bev_num_levels)
         bev_scale_weights = torch.softmax(bev_scale_weights, dim=-1)
-        bev_scale_weights = bev_scale_weights.expand(B, Q, self.num_groups, self.num_frames, self.num_points, self.bev_num_levels)
+        bev_scale_weights = bev_scale_weights.expand(B, Q, self.num_groups, 1, self.num_points, self.bev_num_levels)
 
         # sampling
         sampled_feats, sampled_feats_bev = sampling_4d(
