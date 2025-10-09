@@ -9,6 +9,15 @@ from mmdet3d.core import bbox3d2result
 from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
 from .utils import GridMask, pad_multiple, GpuPhotoMetricDistortion
 
+import torch.nn.functional as F
+import torch.nn as nn
+
+def generate_forward_transformation_matrix(bda, img_meta_dict=None):
+    b = bda.size(0)
+    hom_res = torch.eye(4)[None].repeat(b, 1, 1).to(bda.device)
+    for i in range(b):
+        hom_res[i, :3, :3] = bda[i, :3, :3]
+    return hom_res
 
 @DETECTORS.register_module()
 class SparseBEV(MVXTwoStageDetector):
@@ -23,6 +32,13 @@ class SparseBEV(MVXTwoStageDetector):
                  pts_backbone=None,
                  img_neck=None,
                  pts_neck=None,
+                 forward_projection=None,
+                 frpn=None,
+                 img_bev_encoder_backbone=None,
+                 img_bev_encoder_neck=None,
+                 bev_pts_bbox_head=None,
+                 bev_train_cfg=None,
+                 bev_test_cfg=None,
                  pts_bbox_head=None,
                  img_roi_head=None,
                  img_rpn_head=None,
@@ -43,6 +59,15 @@ class SparseBEV(MVXTwoStageDetector):
         self.memory = {}
         self.queue = queue.Queue()
 
+        from mmdet.models import builder
+        self.forward_projection = builder.build_neck(forward_projection) if forward_projection else None
+        self.img_bev_encoder_backbone = builder.build_backbone(img_bev_encoder_backbone) if img_bev_encoder_backbone else None
+        self.img_bev_encoder_neck = builder.build_neck(img_bev_encoder_neck) if img_bev_encoder_neck else None
+        self.bev_pts_bbox_head = builder.build_head(bev_pts_bbox_head) if bev_pts_bbox_head else None
+        self.fuse_his = False
+        if self.fuse_his:
+            self.prepare_his()
+        
     @auto_fp16(apply_to=('img'), out_fp32=True)
     def extract_img_feat(self, img):
         if self.use_grid_mask:
@@ -58,7 +83,7 @@ class SparseBEV(MVXTwoStageDetector):
 
         return img_feats
 
-    def extract_feat(self, img, img_metas):
+    def extract_feat(self, img, img_metas, img_inputs):
         if isinstance(img, list):
             img = torch.stack(img, dim=0)
 
@@ -127,7 +152,9 @@ class SparseBEV(MVXTwoStageDetector):
         for img_feat in img_feats:
             BN, C, H, W = img_feat.size()
             img_feats_reshaped.append(img_feat.view(B, int(BN / B), C, H, W))
-
+        if self.with_specific_component('forward_projection'):
+            bev_feat, _ = self.forward_projection([img_feats_reshaped[-2]] + img_inputs[1:7])
+            return (img_feats_reshaped, bev_feat)
         return img_feats_reshaped
 
     def forward_pts_train(self,
@@ -135,7 +162,7 @@ class SparseBEV(MVXTwoStageDetector):
                           gt_bboxes_3d,
                           gt_labels_3d,
                           img_metas,
-                          gt_bboxes_ignore=None):
+                          gt_bboxes_ignore=None, lss_bev= None):
         """Forward function for point cloud branch.
         Args:
             pts_feats (list[torch.Tensor]): Features of point cloud branch
@@ -149,7 +176,7 @@ class SparseBEV(MVXTwoStageDetector):
         Returns:
             dict: Losses of each branch.
         """
-        outs = self.pts_bbox_head(pts_feats, img_metas)
+        outs = self.pts_bbox_head(pts_feats, img_metas, lss_bev)
         loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
         losses = self.pts_bbox_head.loss(*loss_inputs)
 
@@ -182,7 +209,7 @@ class SparseBEV(MVXTwoStageDetector):
                       proposals=None,
                       gt_bboxes_ignore=None,
                       img_depth=None,
-                      img_mask=None):
+                      img_inputs=None):
         """Forward training function.
         Args:
             points (list[torch.Tensor], optional): Points of each sample.
@@ -206,13 +233,28 @@ class SparseBEV(MVXTwoStageDetector):
         Returns:
             dict: Losses of different branches.
         """
-        img_feats = self.extract_feat(img, img_metas)
-
+        img_feats = self.extract_feat(img, img_metas, img_inputs)
+        if type(img_feats) in [tuple]:
+            img_feats, bev_feat = img_feats
+            bev_feat = self.bev_encoder(bev_feat)
+            if self.fuse_his:
+                if type(bev_feat) in [list, tuple]:
+                    bev_feat = bev_feat[0]
+                bev_feat = self.fuse_history(bev_feat, img_metas, img_inputs[-1])
+                if type(bev_feat) not in [list, tuple]:
+                    bev_feat = [bev_feat]
         for i in range(len(img_metas)):
             img_metas[i]['gt_bboxes_3d'] = gt_bboxes_3d[i]
             img_metas[i]['gt_labels_3d'] = gt_labels_3d[i]
 
-        losses = self.forward_pts_train(img_feats, gt_bboxes_3d, gt_labels_3d, img_metas, gt_bboxes_ignore)
+        losses = dict()
+        if self.with_specific_component('pts_bbox_head'):
+            losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d, gt_labels_3d, img_metas, gt_bboxes_ignore, bev_feat.copy())
+            # losses.update({ k : v * 1e-8 for k, v in losses_pts.items()})
+            losses.update(losses_pts)
+        if self.with_specific_component('bev_pts_bbox_head'):
+            losses_bev = self.bev_forward_pts_train(bev_feat, gt_bboxes_3d, gt_labels_3d, img_metas, gt_bboxes_ignore)
+            losses.update({f"loss.bev.{k}": v for k, v in losses_bev.items()})
 
         return losses
 
@@ -224,29 +266,56 @@ class SparseBEV(MVXTwoStageDetector):
         img = [img] if img is None else img
         return self.simple_test(img_metas[0], img[0], **kwargs)
 
-    def simple_test_pts(self, x, img_metas, rescale=False):
-        outs = self.pts_bbox_head(x, img_metas)
+    def simple_test_pts(self, x, img_metas, rescale=False, lss_bev=None):
+        outs = self.pts_bbox_head(x, img_metas, lss_bev)
         bbox_list = self.pts_bbox_head.get_bboxes(outs, img_metas[0], rescale=rescale)
 
-        bbox_results = [
-            bbox3d2result(bboxes, scores, labels)
-            for bboxes, scores, labels in bbox_list
-        ]
+        # bbox_results = [
+        #     bbox3d2result(bboxes, scores, labels)
+        #     for bboxes, scores, labels in bbox_list
+        # ]
 
-        return bbox_results
+        return bbox_list
     
-    def simple_test(self, img_metas, img=None, rescale=False):
+    def simple_test(self, img_metas, img=None, rescale=False, img_inputs=None):
         world_size = get_dist_info()[1]
-        if world_size == 1:  # online
-            return self.simple_test_online(img_metas, img, rescale)
+        if world_size == 1 and False:  # online
+            return self.simple_test_online(img_metas, img, rescale, img_inputs[0])
         else:  # offline
-            return self.simple_test_offline(img_metas, img, rescale)
+            return self.simple_test_offline(img_metas, img, rescale, img_inputs[0])
 
-    def simple_test_offline(self, img_metas, img=None, rescale=False):
-        img_feats = self.extract_feat(img=img, img_metas=img_metas)
+    def simple_test_offline(self, img_metas, img=None, rescale=False, img_inputs=None):
+        img_feats = self.extract_feat(img=img, img_metas=img_metas, img_inputs=img_inputs)
+        if type(img_feats) in [tuple]:
+            img_feats, bev_feat = img_feats
+            bev_feat = self.bev_encoder(bev_feat)
+            if self.fuse_his:
+                if type(bev_feat) in [list, tuple]:
+                    bev_feat = bev_feat[0]
+                bev_feat = self.fuse_history(bev_feat, img_metas, img_inputs[-1])
 
         bbox_list = [dict() for _ in range(len(img_metas))]
-        bbox_pts = self.simple_test_pts(img_feats, img_metas, rescale=rescale)
+        if self.with_specific_component('pts_bbox_head'):
+            bbox_pts = self.simple_test_pts(img_feats, img_metas, rescale=rescale, lss_bev=bev_feat.copy())
+        bbox_bev = None
+        if self.with_specific_component('bev_pts_bbox_head'):
+            bbox_bev = self.simple_test_bev(bev_feat, img_metas, rescale=rescale)
+            from mmdet3d.core.bbox.structures.lidar_box3d import LiDARInstance3DBoxes
+            bbox_all = []
+            for boxes1, boxes2 in zip(bbox_pts, bbox_bev):
+                bboxes = torch.cat([boxes1[0].tensor, boxes2[0].tensor], dim=0)
+                scores = torch.cat([boxes1[1], boxes2[1]], dim=0)
+                labels = torch.cat([boxes1[2], boxes2[2]], dim=0)
+                
+                bboxes = LiDARInstance3DBoxes(bboxes, box_dim=boxes1[0].box_dim, with_yaw=boxes1[0].with_yaw)
+                bbox_all.append([bboxes, scores, labels])
+
+        bbox_all = bbox_all if bbox_bev else bbox_pts
+        
+        bbox_pts = [
+            bbox3d2result(bboxes, scores, labels)
+            for bboxes, scores, labels in bbox_all
+        ]
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
             result_dict['pts_bbox'] = pts_bbox
 
@@ -319,3 +388,239 @@ class SparseBEV(MVXTwoStageDetector):
             result_dict['pts_bbox'] = pts_bbox
 
         return bbox_list
+
+    @force_fp32()
+    def bev_encoder(self, x):
+        x = self.img_bev_encoder_backbone(x)
+        x = self.img_bev_encoder_neck(x)
+        
+        if type(x) not in [list, tuple]:
+             x = [x]
+
+        return x
+
+    def prepare_his(self):
+        # Deal with history
+        self.single_bev_num_channels = 256
+        self.do_history = False
+        self.interpolation_mode = 'bilinear'
+        self.history_cat_num = 16
+        self.history_cam_sweep_freq = 0.5 # seconds between each frame
+        history_cat_conv_out_channels = 256
+        ## Embed each sample with its relative temporal offset with current timestep
+        conv = nn.Conv3d
+        self.history_keyframe_time_conv = nn.Sequential(
+             conv(self.single_bev_num_channels + 1,
+                     self.single_bev_num_channels,
+                     kernel_size=1,
+                     padding=0,
+                     stride=1),
+             nn.SyncBatchNorm(self.single_bev_num_channels),
+             nn.ReLU(inplace=True))
+        ## Then concatenate and send them through an MLP.
+        self.history_keyframe_cat_conv = nn.Sequential(
+            conv(self.single_bev_num_channels * (self.history_cat_num + 1),
+                    history_cat_conv_out_channels,
+                    kernel_size=1,
+                    padding=0,
+                    stride=1),
+            nn.SyncBatchNorm(history_cat_conv_out_channels),
+            nn.ReLU(inplace=True))
+        self.history_sweep_time = None
+        self.history_bev = None
+        self.history_bev_before_encoder = None
+        self.history_seq_ids = None
+        self.history_forward_augs = None
+
+    @force_fp32()
+    def generate_grid(self, history_forward_augs, forward_augs, curr_to_prev_ego_rt, grid_size, dtype=torch.float, device='cuda'):
+        # Generate grid
+        n, _, z, h, w = grid_size
+        xs = torch.linspace(0, w - 1, w, dtype=dtype, device=device).view(1, w, 1).expand(h, w, z)
+        ys = torch.linspace(0, h - 1, h, dtype=dtype, device=device).view(h, 1, 1).expand(h, w, z)
+        zs = torch.linspace(0, z - 1, z, dtype=dtype, device=device).view(1, 1, z).expand(h, w, z)
+        grid = torch.stack(
+            (xs, ys, zs, torch.ones_like(xs)), -1).view(1, h, w, z, 4).expand(n, h, w, z, 4).view(n, h, w, z, 4, 1)
+
+        # This converts BEV indices to meters
+        # IMPORTANT: the feat2bev[0, 3] is changed from feat2bev[0, 2] because previous was 2D rotation
+        # which has 2-th index as the hom index. Now, with 3D hom, 3-th is hom
+        feat2bev = torch.zeros((4,4),dtype=grid.dtype).to(grid)
+        feat2bev[0, 0] = self.forward_projection.dx[0]
+        feat2bev[1, 1] = self.forward_projection.dx[1]
+        feat2bev[2, 2] = self.forward_projection.dx[2]
+        feat2bev[0, 3] = self.forward_projection.bx[0] - self.forward_projection.dx[0] / 2.
+        feat2bev[1, 3] = self.forward_projection.bx[1] - self.forward_projection.dx[1] / 2.
+        feat2bev[2, 3] = self.forward_projection.bx[2] - self.forward_projection.dx[2] / 2.
+        # feat2bev[2, 2] = 1
+        feat2bev[3, 3] = 1
+        feat2bev = feat2bev.view(1,4,4)
+
+        ## Get flow for grid sampling.
+        # The flow is as follows. Starting from grid locations in curr bev, transform to BEV XY11,
+        # backward of current augmentations, curr lidar to prev lidar, forward of previous augmentations,
+        # transform to previous grid locations.
+        rt_flow = (torch.inverse(feat2bev) @ history_forward_augs @ curr_to_prev_ego_rt
+                   @ torch.inverse(forward_augs) @ feat2bev)
+
+        grid = rt_flow.view(n, 1, 1, 1, 4, 4) @ grid
+
+        # normalize and sample
+        normalize_factor = torch.tensor([w - 1.0, h - 1.0, z - 1.0], dtype=dtype, device=device)
+        grid = grid[:,:,:,:, :3,0] / normalize_factor.view(1, 1, 1, 1, 3) * 2.0 - 1.0
+        return grid
+
+    @force_fp32()
+    def fuse_history(self, curr_bev, img_metas, bda): # align features with 3d shift
+        voxel_feat = True  if len(curr_bev.shape) == 5 else False
+        if voxel_feat:
+            curr_bev = curr_bev.permute(0, 1, 4, 2, 3) # n, c, z, h, w
+        voxel_feat = True
+        curr_bev = curr_bev.unsqueeze(2)
+        seq_ids = torch.LongTensor([
+            single_img_metas['sequence_group_idx'] 
+            for single_img_metas in img_metas]).to(curr_bev.device)
+        start_of_sequence = torch.BoolTensor([
+            single_img_metas['start_of_sequence'] 
+            for single_img_metas in img_metas]).to(curr_bev.device)
+        forward_augs = generate_forward_transformation_matrix(bda)
+
+        curr_to_prev_ego_rt = torch.stack([
+            single_img_metas['curr_to_prev_ego_rt']
+            for single_img_metas in img_metas]).to(curr_bev)
+
+        ## Deal with first batch
+        if self.history_bev is None:
+            self.history_bev = curr_bev.clone()
+            self.history_seq_ids = seq_ids.clone()
+            self.history_forward_augs = forward_augs.clone()
+
+            # Repeat the first frame feature to be history
+            if voxel_feat:
+                self.history_bev = curr_bev.repeat(1, self.history_cat_num, 1, 1, 1) 
+            else:
+                self.history_bev = curr_bev.repeat(1, self.history_cat_num, 1, 1)
+            # All 0s, representing current timestep.
+            self.history_sweep_time = curr_bev.new_zeros(curr_bev.shape[0], self.history_cat_num)
+
+
+        self.history_bev = self.history_bev.detach()
+
+        assert self.history_bev.dtype == torch.float32
+
+        ## Deal with the new sequences
+        # First, sanity check. For every non-start of sequence, history id and seq id should be same.
+
+        assert (self.history_seq_ids != seq_ids)[~start_of_sequence].sum() == 0, \
+                "{}, {}, {}".format(self.history_seq_ids, seq_ids, start_of_sequence)
+
+        ## Replace all the new sequences' positions in history with the curr_bev information
+        self.history_sweep_time += 1 # new timestep, everything in history gets pushed back one.
+        if start_of_sequence.sum()>0:
+            if voxel_feat:    
+                self.history_bev[start_of_sequence] = curr_bev[start_of_sequence].repeat(1, self.history_cat_num, 1, 1, 1)
+            else:
+                self.history_bev[start_of_sequence] = curr_bev[start_of_sequence].repeat(1, self.history_cat_num, 1, 1)
+            
+            self.history_sweep_time[start_of_sequence] = 0 # zero the new sequence timestep starts
+            self.history_seq_ids[start_of_sequence] = seq_ids[start_of_sequence]
+            self.history_forward_augs[start_of_sequence] = forward_augs[start_of_sequence]
+
+
+        ## Get grid idxs & grid2bev first.
+        if voxel_feat:
+            n, c_, z, h, w = curr_bev.shape
+
+        grid = self.generate_grid(self.history_forward_augs, forward_augs, curr_to_prev_ego_rt, \
+                                  curr_bev.shape, dtype=curr_bev.dtype, device=curr_bev.device)
+        
+        tmp_bev = self.history_bev
+        if voxel_feat: 
+            n, mc, z, h, w = tmp_bev.shape
+            tmp_bev = tmp_bev.reshape(n, mc, z, h, w)
+        sampled_history_bev = F.grid_sample(tmp_bev, grid.to(curr_bev.dtype).permute(0, 3, 1, 2, 4), align_corners=True, mode=self.interpolation_mode)
+
+        ## Update history
+        # Add in current frame to features & timestep
+        self.history_sweep_time = torch.cat(
+            [self.history_sweep_time.new_zeros(self.history_sweep_time.shape[0], 1), self.history_sweep_time],
+            dim=1) # B x (1 + T)
+
+        if voxel_feat:
+            sampled_history_bev = sampled_history_bev.reshape(n, mc, z, h, w)
+            curr_bev = curr_bev.reshape(n, c_, z, h, w)
+        feats_cat = torch.cat([curr_bev, sampled_history_bev], dim=1) # B x (1 + T) * 80 x H x W or B x (1 + T) * 80 xZ x H x W 
+
+        # Reshape and concatenate features and timestep
+        feats_to_return = feats_cat.reshape(
+                feats_cat.shape[0], self.history_cat_num + 1, self.single_bev_num_channels, *feats_cat.shape[2:]) # B x (1 + T) x 80 x H x W
+        if voxel_feat:
+            feats_to_return = torch.cat(
+            [feats_to_return, self.history_sweep_time[:, :, None, None, None, None].repeat(
+                1, 1, 1, *feats_to_return.shape[3:]) * self.history_cam_sweep_freq
+            ], dim=2) # B x (1 + T) x 81 x Z x H x W
+        else:
+            feats_to_return = torch.cat(
+            [feats_to_return, self.history_sweep_time[:, :, None, None, None].repeat(
+                1, 1, 1, feats_to_return.shape[3], feats_to_return.shape[4]) * self.history_cam_sweep_freq
+            ], dim=2) # B x (1 + T) x 81 x H x W
+
+        # Time conv
+        feats_to_return = self.history_keyframe_time_conv(
+            feats_to_return.reshape(-1, *feats_to_return.shape[2:])).reshape(
+                feats_to_return.shape[0], feats_to_return.shape[1], -1, *feats_to_return.shape[3:]) # B x (1 + T) x 80 xZ x H x W
+
+        # Cat keyframes & conv
+        feats_to_return = self.history_keyframe_cat_conv(
+            feats_to_return.reshape(
+                feats_to_return.shape[0], -1, *feats_to_return.shape[3:])) # B x C x H x W or B x C x Z x H x W
+        
+        self.history_bev = feats_cat[:, :-self.single_bev_num_channels, ...].detach().clone()
+        self.history_sweep_time = self.history_sweep_time[:, :-1]
+        self.history_forward_augs = forward_augs.clone()
+        # if voxel_feat:
+        #     feats_to_return = feats_to_return.permute(0, 1, 3, 4, 2)
+        feats_to_return = feats_to_return.squeeze(2)
+        if not self.do_history:
+            self.history_bev = None
+        return feats_to_return.clone()
+     
+    def bev_forward_pts_train(self,
+                              pts_feats,
+                              gt_bboxes_3d,
+                              gt_labels_3d,
+                              img_metas,
+                              gt_bboxes_ignore=None):
+        """Forward function for point cloud branch.
+        Args:
+            pts_feats (list[torch.Tensor]): Features of point cloud branch
+            gt_bboxes_3d (list[:obj:`BaseInstance3DBoxes`]): Ground truth
+                boxes for each sample.
+            gt_labels_3d (list[torch.Tensor]): Ground truth labels for
+                boxes of each sampole
+            img_metas (list[dict]): Meta information of samples.
+            gt_bboxes_ignore (list[torch.Tensor], optional): Ground truth
+                boxes to be ignored. Defaults to None.
+        Returns:
+            dict: Losses of each branch.
+        """
+        outs = self.bev_pts_bbox_head(pts_feats)
+        loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
+        losses = self.bev_pts_bbox_head.loss(*loss_inputs)
+
+        return losses    
+    
+    def simple_test_bev(self, x, img_metas, rescale=False):
+        outs = self.bev_pts_bbox_head(x)
+        bbox_list = self.bev_pts_bbox_head.get_bboxes(outs, img_metas, rescale=rescale)
+
+        # bbox_results = [
+        #     bbox3d2result(bboxes, scores, labels)
+        #     for bboxes, scores, labels in bbox_list
+        # ]
+
+        return bbox_list
+    
+    def with_specific_component(self, component_name):
+        """Whether the model owns a specific component"""
+        return getattr(self, component_name, None) is not None

@@ -239,6 +239,13 @@ class RandomTransformImage(object):
                 )
                 results['img'][i] = np.array(img).astype(np.uint8)
                 results['lidar2img'][i] = ida_mat @ results['lidar2img'][i]
+                # TODO:input
+                post_tran = np.zeros(3)
+                post_rot = np.eye(3)
+                post_tran[:2] = ida_mat[:2, 2]  
+                post_rot[:2, :2] = ida_mat[:2, :2]
+                results['post_rots'].append(torch.tensor(post_rot, dtype=torch.float32))
+                results['post_trans'].append(torch.tensor(post_tran, dtype=torch.float32))
 
         elif len(results['img']) == 6:
             for i in range(len(results['img'])):
@@ -363,7 +370,20 @@ class GlobalRotScaleTransImage(object):
         results["gt_bboxes_3d"].scale(scale_ratio)
 
         # TODO: support translation
-
+        # TODO: input
+        rotate_angle = torch.tensor(rot_angle)
+        rot_sin = torch.sin(rotate_angle)
+        rot_cos = torch.cos(rotate_angle)
+        rot_mat = torch.Tensor([[rot_cos, -rot_sin, 0], [rot_sin, rot_cos, 0],
+                                [0, 0, 1]])
+        scale_mat = torch.Tensor([[scale_ratio, 0, 0], [0, scale_ratio, 0],
+                                  [0, 0, scale_ratio]])
+        flip_mat = torch.Tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+        
+        bda_mat = torch.zeros(4, 4)
+        bda_mat[3, 3] = 1
+        bda_mat[:3, :3] = flip_mat @ (scale_mat @ rot_mat)
+        results['bda_mat'] = bda_mat
         return results
 
     def rotate_z(self, results, rot_angle):

@@ -29,7 +29,12 @@ def compose_lidar2img(ego2global_translation_curr,
     viewpad[:cam_intrinsic_past.shape[0], :cam_intrinsic_past.shape[1]] = cam_intrinsic_past
     lidar2img = (viewpad @ lidar2cam_rt.T).astype(np.float32)
 
-    return lidar2img
+    cam2lidar = np.eye(4).astype(np.float32)
+    cam2lidar[3, 3] = 1
+    cam2lidar[:3, :3] = R.T
+    cam2lidar[:3, 3] = T
+    
+    return lidar2img, cam2lidar
 
 
 @PIPELINES.register_module()
@@ -63,6 +68,12 @@ class LoadMultiViewImageFromMultiSweeps(object):
                     results['img_timestamp'].append(results['img_timestamp'][j])
                     results['filename'].append(results['filename'][j])
                     results['lidar2img'].append(np.copy(results['lidar2img'][j]))
+                    sensor2ego, ego2global = get_sensor_transforms(results['curr'], cam_types[j])
+                    intrin = torch.Tensor(results['curr']['cams'][cam_types[j]]['cam_intrinsic'])
+                    results['intrins'].append(intrin)
+                    results['sensor2egos'].append(sensor2ego)
+                    results['ego2globals'].append(ego2global)
+                    results['cam2lidar'].append(results['cam2lidar'][j])
         else:
             if self.test_mode:
                 interval = self.test_interval
@@ -88,7 +99,7 @@ class LoadMultiViewImageFromMultiSweeps(object):
                     results['img'].append(mmcv.imread(sweep[sensor]['data_path'], self.color_type))
                     results['img_timestamp'].append(sweep[sensor]['timestamp'] / 1e6)
                     results['filename'].append(os.path.relpath(sweep[sensor]['data_path']))
-                    results['lidar2img'].append(compose_lidar2img(
+                    lidar2img, cam2lidar = compose_lidar2img(
                         results['ego2global_translation'],
                         results['ego2global_rotation'],
                         results['lidar2ego_translation'],
@@ -96,7 +107,15 @@ class LoadMultiViewImageFromMultiSweeps(object):
                         sweep[sensor]['sensor2global_translation'],
                         sweep[sensor]['sensor2global_rotation'],
                         sweep[sensor]['cam_intrinsic'],
-                    ))
+                    )
+                    results['lidar2img'].append(lidar2img)
+                    # TODO:input
+                    sensor2ego, ego2global = get_sensor_transforms({'cams':sweep}, sensor)
+                    intrin = torch.Tensor(sweep[sensor]['cam_intrinsic'])
+                    results['intrins'].append(intrin)
+                    results['sensor2egos'].append(sensor2ego)
+                    results['ego2globals'].append(ego2global)
+                    results['cam2lidar'].append(cam2lidar)
 
         return results
 
@@ -389,4 +408,86 @@ class LoadMultiViewImageFromMultiSweepsFutureInterleave(object):
                 results['filename'].append(results_next['filename'][i * 6 + j])
                 results['lidar2img'].append(results_next['lidar2img'][i * 6 + j])
 
+        return results
+
+    
+    
+import torch
+from pyquaternion import Quaternion
+def get_sensor_transforms(cam_info, cam_name):
+    w, x, y, z = cam_info['cams'][cam_name]['sensor2ego_rotation']
+    # sweep sensor to sweep ego
+    sensor2ego_rot = torch.Tensor(
+        Quaternion(w, x, y, z).rotation_matrix)
+    sensor2ego_tran = torch.Tensor(
+        cam_info['cams'][cam_name]['sensor2ego_translation'])
+    sensor2ego = sensor2ego_rot.new_zeros((4, 4))
+    sensor2ego[3, 3] = 1
+    sensor2ego[:3, :3] = sensor2ego_rot
+    sensor2ego[:3, -1] = sensor2ego_tran
+    # sweep ego to global
+    w, x, y, z = cam_info['cams'][cam_name]['ego2global_rotation']
+    ego2global_rot = torch.Tensor(
+        Quaternion(w, x, y, z).rotation_matrix)
+    ego2global_tran = torch.Tensor(
+        cam_info['cams'][cam_name]['ego2global_translation'])
+    ego2global = ego2global_rot.new_zeros((4, 4))
+    ego2global[3, 3] = 1
+    ego2global[:3, :3] = ego2global_rot
+    ego2global[:3, -1] = ego2global_tran
+    return sensor2ego, ego2global
+
+@PIPELINES.register_module()
+class PrepareImageInputsone(object):
+    def __init__(
+        self,
+        is_train=False,
+    ):
+        self.is_train = is_train
+
+    def __call__(self, results):
+        results['sensor2egos'] = []
+        results['ego2globals'] = []
+        results['intrins'] = []
+        results['ego2lidars'] = []
+        # 预留
+        results['post_rots'] = []
+        results['post_trans'] = []
+        
+        filename = results['img_filename']
+        for name in filename:
+            cam_type = name.split('/')[3]
+            cam_data = results['curr']['cams'][cam_type]
+            sensor2ego, ego2global = get_sensor_transforms(results['curr'], cam_type)
+            intrin = torch.Tensor(cam_data['cam_intrinsic'])
+            results['intrins'].append(intrin)
+            results['sensor2egos'].append(sensor2ego)
+            results['ego2globals'].append(ego2global)
+            
+        return results
+    
+@PIPELINES.register_module()
+class PrepareImageInputstwo(object):
+    def __init__(
+        self,
+        is_train=False,
+    ):
+        self.is_train = is_train
+
+    def get_inputs(self, results):
+        imgs = results['img'].data
+        sensor2egos = torch.stack(results['sensor2egos'])
+        ego2globals = torch.stack(results['ego2globals'])
+        intrins = torch.stack(results['intrins'])
+        post_rots = torch.stack(results['post_rots'])
+        post_trans = torch.stack(results['post_trans'])
+        if 'bda_mat' in results:
+            bda_mat = results['bda_mat']
+        else:
+            bda_mat = torch.eye(4)
+            # torch.tensor(results['cam2lidar'], dtype=sensor2egos.dtype)
+        return (imgs, torch.tensor(results['cam2lidar'], dtype=sensor2egos.dtype), ego2globals, intrins, post_rots, post_trans, bda_mat)
+
+    def __call__(self, results):
+        results['img_inputs'] = self.get_inputs(results)
         return results

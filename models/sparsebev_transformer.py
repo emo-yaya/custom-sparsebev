@@ -29,8 +29,8 @@ class SparseBEVTransformer(BaseModule):
     def init_weights(self):
         self.decoder.init_weights()
 
-    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
-        cls_scores, bbox_preds = self.decoder(query_bbox, query_feat, mlvl_feats, attn_mask, img_metas)
+    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas, bev_queries=None):
+        cls_scores, bbox_preds = self.decoder(query_bbox, query_feat, mlvl_feats, attn_mask, img_metas, bev_queries)
 
         cls_scores = torch.nan_to_num(cls_scores)
         bbox_preds = torch.nan_to_num(bbox_preds)
@@ -53,7 +53,7 @@ class SparseBEVTransformerDecoder(BaseModule):
     def init_weights(self):
         self.decoder_layer.init_weights()
 
-    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
+    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas, bev_queries):
         cls_scores, bbox_preds = [], []
 
         # calculate time difference according to timestamps
@@ -84,11 +84,20 @@ class SparseBEVTransformerDecoder(BaseModule):
 
             mlvl_feats[lvl] = feat.contiguous()
 
+        for lvl, feat in enumerate(bev_queries):
+            B, TNGC, H, W = feat.shape  # [B, TN, GC, H, W, Z]
+            N, T, G, C = 1, 1, 4, TNGC // 4
+            feat = feat.reshape(B, T, N, G, C, H, W)
+
+            feat = feat.reshape(B*T*G, C, N, H, W)
+            
+            bev_queries[lvl] = feat.contiguous()
+
         for i in range(self.num_layers):
             DUMP.stage_count = i
 
             query_feat, cls_score, bbox_pred = self.decoder_layer(
-                query_bbox, query_feat, mlvl_feats, attn_mask, img_metas
+                query_bbox, query_feat, mlvl_feats, attn_mask, img_metas, bev_queries
             )
             query_bbox = bbox_pred.clone().detach()
 
@@ -142,12 +151,22 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
             reg_branch.append(nn.ReLU(inplace=True))
         reg_branch.append(nn.Linear(self.embed_dims, self.code_size))
         self.reg_branch = nn.Sequential(*reg_branch)
+        self.mixing_bev = AdaptiveMixing(in_dim=embed_dims, in_points=num_points * 1, n_groups=4, out_points=128)
+        self.norm_bev = nn.LayerNorm(embed_dims)
+
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(embed_dims * 2, embed_dims),
+            nn.ReLU(),
+            nn.Linear(embed_dims, embed_dims),
+            nn.Sigmoid()
+        )
 
     @torch.no_grad()
     def init_weights(self):
         self.self_attn.init_weights()
         self.sampling.init_weights()
         self.mixing.init_weights()
+        self.mixing_bev.init_weights()
 
         bias_init = bias_init_with_prob(0.01)
         nn.init.constant_(self.cls_branch[-1].bias, bias_init)
@@ -159,7 +178,7 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
 
         return torch.cat([xyz_new, bbox_delta[..., 3:]], dim=-1)
 
-    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
+    def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas, bev_feats):
         """
         query_bbox: [B, Q, 10] [cx, cy, cz, w, h, d, rot.sin, rot.cos, vx, vy]
         """
@@ -167,8 +186,15 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
         query_feat = query_feat + query_pos
 
         query_feat = self.norm1(self.self_attn(query_bbox, query_feat, attn_mask))
-        sampled_feat = self.sampling(query_bbox, query_feat, mlvl_feats, img_metas)
-        query_feat = self.norm2(self.mixing(sampled_feat, query_feat))
+        sampled_feat, sampled_feat_bev = self.sampling(query_bbox, query_feat, mlvl_feats, img_metas, bev_feats)
+        
+        query_feat_cam = self.norm2(self.mixing(sampled_feat, query_feat))
+        query_feat_bev = self.norm_bev(self.mixing_bev(sampled_feat_bev, query_feat))
+
+        fusion_weight = self.fusion_gate(torch.cat([query_feat_cam, query_feat_bev], dim=-1))
+
+        query_feat = fusion_weight * query_feat_cam + (1 - fusion_weight) * query_feat_bev
+
         query_feat = self.norm3(self.ffn(query_feat))
 
         cls_score = self.cls_branch(query_feat)  # [B, Q, num_classes]
@@ -262,12 +288,15 @@ class SparseBEVSampling(BaseModule):
         self.sampling_offset = nn.Linear(embed_dims, num_groups * num_points * 3)
         self.scale_weights = nn.Linear(embed_dims, num_groups * num_points * num_levels)
 
+        self.bev_num_levels = 1
+        self.bev_scale_weights = nn.Linear(embed_dims, num_groups * num_points * self.bev_num_levels)
+
     def init_weights(self):
         bias = self.sampling_offset.bias.data.view(self.num_groups * self.num_points, 3)
         nn.init.zeros_(self.sampling_offset.weight)
         nn.init.uniform_(bias[:, 0:3], -0.5, 0.5)
 
-    def inner_forward(self, query_bbox, query_feat, mlvl_feats, img_metas):
+    def inner_forward(self, query_bbox, query_feat, mlvl_feats, img_metas, bev_feats):
         '''
         query_bbox: [B, Q, 10]
         query_feat: [B, Q, C]
@@ -298,23 +327,29 @@ class SparseBEVSampling(BaseModule):
         scale_weights = self.scale_weights(query_feat).view(B, Q, self.num_groups, 1, self.num_points, self.num_levels)
         scale_weights = torch.softmax(scale_weights, dim=-1)
         scale_weights = scale_weights.expand(B, Q, self.num_groups, self.num_frames, self.num_points, self.num_levels)
+        
+        # scale bev weights
+        bev_scale_weights = self.bev_scale_weights(query_feat).view(B, Q, self.num_groups, 1, self.num_points, self.bev_num_levels)
+        bev_scale_weights = torch.softmax(bev_scale_weights, dim=-1)
+        bev_scale_weights = bev_scale_weights.expand(B, Q, self.num_groups, 1, self.num_points, self.bev_num_levels)
 
         # sampling
-        sampled_feats = sampling_4d(
+        sampled_feats, sampled_feats_bev = sampling_4d(
             sampling_points,
             mlvl_feats,
             scale_weights,
             img_metas[0]['lidar2img'],
-            image_h, image_w
+            image_h, image_w,
+            bev_feats=bev_feats, scale_weights_bev=bev_scale_weights, pc_range=self.pc_range
         )  # [B, Q, G, FP, C]
 
-        return sampled_feats
+        return sampled_feats, sampled_feats_bev
 
-    def forward(self, query_bbox, query_feat, mlvl_feats, img_metas):
+    def forward(self, query_bbox, query_feat, mlvl_feats, img_metas, bev_feats):
         if self.training and query_feat.requires_grad:
-            return cp(self.inner_forward, query_bbox, query_feat, mlvl_feats, img_metas, use_reentrant=False)
+            return cp(self.inner_forward, query_bbox, query_feat, mlvl_feats, img_metas, bev_feats, use_reentrant=False)
         else:
-            return self.inner_forward(query_bbox, query_feat, mlvl_feats, img_metas)
+            return self.inner_forward(query_bbox, query_feat, mlvl_feats, img_metas, bev_feats)
 
 
 class AdaptiveMixing(nn.Module):
