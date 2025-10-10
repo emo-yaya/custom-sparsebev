@@ -303,9 +303,9 @@ class SparseBEV(MVXTwoStageDetector):
             from mmdet3d.core.bbox.structures.lidar_box3d import LiDARInstance3DBoxes
             bbox_all = []
             for boxes1, boxes2 in zip(bbox_pts, bbox_bev):
-                bboxes = torch.cat([boxes1[0].tensor, boxes2[0].tensor], dim=0)
-                scores = torch.cat([boxes1[1], boxes2[1]], dim=0)
-                labels = torch.cat([boxes1[2], boxes2[2]], dim=0)
+                bboxes = torch.cat([boxes1[0].tensor, boxes2[0].tensor], dim=0)[:500]
+                scores = torch.cat([boxes1[1], boxes2[1]], dim=0)[:500]
+                labels = torch.cat([boxes1[2], boxes2[2]], dim=0)[:500]
                 
                 bboxes = LiDARInstance3DBoxes(bboxes, box_dim=boxes1[0].box_dim, with_yaw=boxes1[0].with_yaw)
                 bbox_all.append([bboxes, scores, labels])
