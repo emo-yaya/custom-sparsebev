@@ -270,12 +270,12 @@ class SparseBEV(MVXTwoStageDetector):
         outs = self.pts_bbox_head(x, img_metas, lss_bev)
         bbox_list = self.pts_bbox_head.get_bboxes(outs, img_metas[0], rescale=rescale)
 
-        # bbox_results = [
-        #     bbox3d2result(bboxes, scores, labels)
-        #     for bboxes, scores, labels in bbox_list
-        # ]
+        bbox_results = [
+            bbox3d2result(bboxes, scores, labels)
+            for bboxes, scores, labels in bbox_list
+        ]
 
-        return bbox_list
+        return bbox_results
     
     def simple_test(self, img_metas, img=None, rescale=False, img_inputs=None):
         world_size = get_dist_info()[1]
@@ -295,27 +295,12 @@ class SparseBEV(MVXTwoStageDetector):
                 bev_feat = self.fuse_history(bev_feat, img_metas, img_inputs[-1])
 
         bbox_list = [dict() for _ in range(len(img_metas))]
-        if self.with_specific_component('pts_bbox_head'):
-            bbox_pts = self.simple_test_pts(img_feats, img_metas, rescale=rescale, lss_bev=bev_feat.copy())
-        bbox_bev = None
-        if self.with_specific_component('bev_pts_bbox_head'):
-            bbox_bev = self.simple_test_bev(bev_feat, img_metas, rescale=rescale)
-            from mmdet3d.core.bbox.structures.lidar_box3d import LiDARInstance3DBoxes
-            bbox_all = []
-            for boxes1, boxes2 in zip(bbox_pts, bbox_bev):
-                bboxes = torch.cat([boxes1[0].tensor, boxes2[0].tensor], dim=0)[:500]
-                scores = torch.cat([boxes1[1], boxes2[1]], dim=0)[:500]
-                labels = torch.cat([boxes1[2], boxes2[2]], dim=0)[:500]
-                
-                bboxes = LiDARInstance3DBoxes(bboxes, box_dim=boxes1[0].box_dim, with_yaw=boxes1[0].with_yaw)
-                bbox_all.append([bboxes, scores, labels])
+        bbox_pts = self.simple_test_pts(img_feats, img_metas, rescale=rescale, lss_bev=bev_feat.copy())
 
-        bbox_all = bbox_all if bbox_bev else bbox_pts
-        
-        bbox_pts = [
-            bbox3d2result(bboxes, scores, labels)
-            for bboxes, scores, labels in bbox_all
-        ]
+        bev_only = False
+        if self.with_specific_component('bev_pts_bbox_head') and bev_only:
+            bbox_pts = self.simple_test_bev(bev_feat, img_metas, rescale=rescale)
+
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
             result_dict['pts_bbox'] = pts_bbox
 
@@ -614,12 +599,12 @@ class SparseBEV(MVXTwoStageDetector):
         outs = self.bev_pts_bbox_head(x)
         bbox_list = self.bev_pts_bbox_head.get_bboxes(outs, img_metas, rescale=rescale)
 
-        # bbox_results = [
-        #     bbox3d2result(bboxes, scores, labels)
-        #     for bboxes, scores, labels in bbox_list
-        # ]
+        bbox_results = [
+            bbox3d2result(bboxes, scores, labels)
+            for bboxes, scores, labels in bbox_list
+        ]
 
-        return bbox_list
+        return bbox_results
     
     def with_specific_component(self, component_name):
         """Whether the model owns a specific component"""
