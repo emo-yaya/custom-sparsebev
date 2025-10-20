@@ -85,7 +85,7 @@ model = dict(
         num_classes=10,
         in_channels=embed_dims,
         num_query=num_query,
-        query_denoising=True,
+        query_denoising=False,
         query_denoising_groups=10,
         code_size=10,
         code_weights=[2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
@@ -293,8 +293,8 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3
 )
-total_epochs = 36
-batch_size = 2
+total_epochs = 24
+batch_size = 8
 
 # load pretrained weights
 load_from = 'pretrain/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth'
